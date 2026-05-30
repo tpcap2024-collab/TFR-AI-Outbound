@@ -3,7 +3,7 @@ import requests
 import numpy as np
 import cv2
 
-app = Flask(__name__**)
+app = Flask(__name__)
 
 @app.route("/")
 def home():
