@@ -1,4 +1,3 @@
-```python
 from flask import Flask, request, jsonify
 import requests
 import cv2
@@ -119,4 +118,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=10000
     )
-```
