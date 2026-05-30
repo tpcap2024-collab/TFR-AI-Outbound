@@ -11,13 +11,10 @@ def home():
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    data = request.json or {}
-
-    img_url = data.get("photo")
+    data = request.json
 
     return {
-        "status": "ok",
-        "photo": img_url
+        "debug": data
     }
 
 if __name__ == "__main__":
