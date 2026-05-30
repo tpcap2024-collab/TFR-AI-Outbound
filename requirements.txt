@@ -1,7 +1,5 @@
-```txt
 flask
 gunicorn
 opencv-python-headless
 numpy
 requests
-```
