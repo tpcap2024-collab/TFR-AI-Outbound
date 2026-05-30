@@ -13,7 +13,7 @@ def home():
 def predict():
 
     data = request.json or {}
-    img_url = data.get("photo")
+    img_url = data.get("link")
 
     if not img_url:
         return {"error": "no photo"}
