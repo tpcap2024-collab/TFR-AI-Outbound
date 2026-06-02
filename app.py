@@ -15,15 +15,19 @@ def predict():
 
     try:
 
-        print("=" * 60)
+        print("=" * 80)
+        print("HEADERS:")
+        print(dict(request.headers))
 
-        print("HEADERS:", dict(request.headers))
-
-        print("RAW DATA:", request.data)
+        print("=" * 80)
+        print("RAW DATA:")
+        print(request.data)
 
         data = request.get_json(silent=True)
 
-        print("JSON:", data)
+        print("=" * 80)
+        print("JSON:")
+        print(data)
 
         if not data:
             return jsonify({
@@ -31,43 +35,49 @@ def predict():
                 "message": "No JSON received"
             }), 400
 
-        image_url = data.get("linkapp")
+        # รองรับหลายชื่อ field
+        image_url = (
+            data.get("link")
+            or data.get("linkapp")
+            or data.get("url")
+            or data.get("image_url")
+        )
 
-        print("IMAGE URL:", image_url)
+        print("=" * 80)
+        print("IMAGE URL:")
+        print(image_url)
 
         if not image_url:
             return jsonify({
                 "status": "error",
-                "message": "link is empty"
+                "message": "Image URL not found"
             }), 400
+
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
 
         response = requests.get(
             image_url,
+            headers=headers,
             timeout=30,
             allow_redirects=True
         )
 
+        print("=" * 80)
         print("DOWNLOAD STATUS:", response.status_code)
-
-        print(
-            "CONTENT TYPE:",
-            response.headers.get("Content-Type")
-        )
-
-        print(
-            "CONTENT LENGTH:",
-            len(response.content)
-        )
+        print("FINAL URL:", response.url)
+        print("CONTENT TYPE:", response.headers.get("Content-Type"))
+        print("CONTENT LENGTH:", len(response.content))
 
         if response.status_code != 200:
-
             return jsonify({
                 "status": "error",
-                "message": f"download failed {response.status_code}"
+                "message": f"Download failed ({response.status_code})"
             }), 400
 
-        img_array = np.asarray(
-            bytearray(response.content),
+        img_array = np.frombuffer(
+            response.content,
             dtype=np.uint8
         )
 
@@ -76,26 +86,26 @@ def predict():
             cv2.IMREAD_COLOR
         )
 
-        print(
-            "IMAGE OBJECT:",
-            img is not None
-        )
+        print("=" * 80)
+        print("IMAGE OBJECT:", img is not None)
 
         if img is None:
 
+            preview = response.text[:500]
+
+            print("RESPONSE PREVIEW:")
+            print(preview)
+
             return jsonify({
                 "status": "error",
-                "message": "cannot decode image"
+                "message": "Cannot decode image",
+                "content_type": response.headers.get("Content-Type")
             }), 400
 
         h, w = img.shape[:2]
 
-        print(
-            "IMAGE SIZE:",
-            w,
-            "x",
-            h
-        )
+        print("=" * 80)
+        print("IMAGE SIZE:", w, "x", h)
 
         return jsonify({
             "status": "success",
@@ -105,8 +115,10 @@ def predict():
 
     except Exception as e:
 
-        print("EXCEPTION:")
-        print(traceback.format_exc())
+        print("=" * 80)
+        print("EXCEPTION")
+
+        traceback.print_exc()
 
         return jsonify({
             "status": "error",
