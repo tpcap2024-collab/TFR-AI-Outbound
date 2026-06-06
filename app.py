@@ -30,8 +30,9 @@ def update_appsheet(row_id, volume_text):
         "Action": "Edit",
         "Rows": [
             {
-                "id": row_id,            # ✔ KEY (UNIQUEID from AppSheet)
-                "TFR AI": volume_text    # ✔ เช่น "71%"
+                "id": row_id,            # KEY
+                "TFR AI": volume_text,   # % result
+                "status": "Done"         # FINAL STATUS
             }
         ]
     }
@@ -129,7 +130,7 @@ def predict():
         roi = cv2.dilate(roi, np.ones((7, 7), np.uint8), 1)
 
         # =========================
-        # VOLUME CALCULATION
+        # VOLUME
         # =========================
         fill = cv2.countNonZero(roi)
         total = roi.size
@@ -148,10 +149,14 @@ def predict():
         # =========================
         update_appsheet(row_id, volume_text)
 
+        # =========================
+        # RESPONSE
+        # =========================
         return jsonify({
             "status": "success",
             "id": row_id,
-            "volume": volume_text
+            "TFR AI": volume_text,
+            "app_status": "Done"
         })
 
     except Exception:
@@ -160,7 +165,7 @@ def predict():
 
 
 # =========================
-# RUN SERVER
+# RUN
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
