@@ -13,11 +13,10 @@ APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
 ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
 TABLE_NAME = "Data TFR"
 
-
 # =========================
-# UPDATE APP SHEET (FIXED)
+# UPDATE APPSHEET
 # =========================
-def update_appsheet(date_value, volume):
+def update_appsheet(key_id, volume):
 
     url = f"https://api.appsheet.com/api/v2/apps/{APP_ID}/tables/{TABLE_NAME}/Action"
 
@@ -30,7 +29,7 @@ def update_appsheet(date_value, volume):
         "Action": "Edit",
         "Rows": [
             {
-                "Date": date_value,   # ✅ KEY = Date
+                "KeyID": key_id,     # 👈 KEY หลักใหม่
                 "TFR AI": volume
             }
         ]
@@ -53,25 +52,26 @@ def home():
 
 
 # =========================
-# PREDICT
+# PREDICT API
 # =========================
 @app.route("/predict", methods=["POST"])
 def predict():
 
     try:
         data = request.get_json(silent=True)
+        print("=" * 60)
         print("JSON:", data)
 
         if not data:
-            return jsonify({"status": "error"}), 400
+            return jsonify({"status": "error", "message": "No JSON"}), 400
 
         image_url = data.get("link")
-        date_value = data.get("datetime")   # ✅ ใช้ Date จริงจาก AppSheet
+        key_id = data.get("KeyID") or data.get("keyid")
 
         print("IMAGE URL:", image_url)
-        print("DATE:", date_value)
+        print("KEY ID:", key_id)
 
-        if not image_url or not date_value:
+        if not image_url or not key_id:
             return jsonify({"status": "error", "message": "missing data"}), 400
 
         # =========================
@@ -83,6 +83,9 @@ def predict():
             headers={"User-Agent": "Mozilla/5.0"}
         )
 
+        if response.status_code != 200:
+            return jsonify({"status": "error", "message": "download failed"}), 400
+
         img = cv2.imdecode(
             np.frombuffer(response.content, np.uint8),
             cv2.IMREAD_COLOR
@@ -91,8 +94,10 @@ def predict():
         if img is None:
             return jsonify({"status": "error", "message": "decode failed"}), 400
 
+        print("IMAGE OK")
+
         # =========================
-        # PROCESS
+        # PROCESS IMAGE
         # =========================
         img = cv2.resize(img, (800, 600))
 
@@ -113,17 +118,24 @@ def predict():
         combined = mask | red | blue | green | white
 
         h, w = combined.shape
+
+        # ROI
         roi = combined[int(h*0.18):int(h*0.80), int(w*0.05):int(w*0.95)]
 
+        # remove ceiling noise
         roi[:int(roi.shape[0]*0.12), :] = 0
 
+        # clean
         roi = cv2.morphologyEx(roi, cv2.MORPH_OPEN, np.ones((5,5), np.uint8))
         roi = cv2.dilate(roi, np.ones((7,7), np.uint8), 1)
 
         # =========================
-        # VOLUME
+        # VOLUME CALCULATION
         # =========================
-        volume = int((cv2.countNonZero(roi) / roi.size) * 100)
+        fill = cv2.countNonZero(roi)
+        total = roi.size
+
+        volume = int((fill / total) * 100)
 
         if volume >= 85:
             volume = 100
@@ -131,12 +143,13 @@ def predict():
         print("VOLUME:", volume)
 
         # =========================
-        # UPDATE APP SHEET
+        # UPDATE APPSHEET
         # =========================
-        update_appsheet(date_value, volume)
+        update_appsheet(key_id, volume)
 
         return jsonify({
             "status": "success",
+            "KeyID": key_id,
             "volume": volume
         })
 
@@ -145,5 +158,8 @@ def predict():
         return jsonify({"status": "error"}), 500
 
 
+# =========================
+# RUN
+# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
