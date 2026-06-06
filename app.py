@@ -126,18 +126,31 @@ def predict():
         roi = cv2.morphologyEx(roi, cv2.MORPH_OPEN, np.ones((5,5), np.uint8))
         roi = cv2.dilate(roi, np.ones((7,7), np.uint8), 1)
 
-        # =========================
-        # VOLUME
-        # =========================
-        fill = cv2.countNonZero(roi)
-        total = roi.size
+# =========================
+# VOLUME
+# =========================
+fill = cv2.countNonZero(roi)
+total = roi.size
 
-        volume_percent = int((fill / total) * 100)
+volume_percent = int((fill / total) * 100)
 
-        if volume_percent >= 85:
-        volume_percent = 100
+if volume_percent >= 85:
+    volume_percent = 100
 
-        volume_text = f"{volume_percent}%"
+volume_text = f"{volume_percent}%"
+
+print("VOLUME:", volume_text)
+
+# =========================
+# UPDATE APPSHEET
+# =========================
+update_appsheet(row_id, volume_text)
+
+return jsonify({
+    "status": "success",
+    "id": row_id,
+    "volume": volume_text
+})
 
         # =========================
         # UPDATE APPSHEET
