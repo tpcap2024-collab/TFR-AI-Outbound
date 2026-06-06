@@ -16,28 +16,26 @@ TABLE_NAME = "Data TFR"
 # =========================
 # UPDATE APP SHEET FUNCTION
 # =========================
-def update_appsheet(row_id, volume, height):
+def update_appsheet(date_value, volume):
 
-    try:
-        url = f"https://api.appsheet.com/api/v2/apps/{APP_ID}/tables/{TABLE_NAME}/Action"
+    url = f"https://api.appsheet.com/api/v2/apps/{APP_ID}/tables/{TABLE_NAME}/Action"
 
-        headers = {
-            "ApplicationAccessKey": ACCESS_KEY,
-            "Content-Type": "application/json"
-        }
+    headers = {
+        "ApplicationAccessKey": ACCESS_KEY,
+        "Content-Type": "application/json"
+    }
 
-        payload = {
-            "Action": "Edit",
-            "Properties": {},
-            "Rows": [
-                {
-                    "ID": row_id,          # KEY column
-                    "TFR AI": volume,      # column M
-                }
-            ]
-        }
+    payload = {
+        "Action": "Edit",
+        "Rows": [
+            {
+                "Date": date_value,   # 👈 ใช้ Date เป็น KEY
+                "TFR AI": volume
+            }
+        ]
+    }
 
-        r = requests.post(url, json=payload, headers=headers)
+    requests.post(url, json=payload, headers=headers)
 
         print("APP SHEET UPDATE:", r.status_code, r.text)
 
