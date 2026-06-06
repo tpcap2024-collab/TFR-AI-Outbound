@@ -10,13 +10,14 @@ app = Flask(__name__)
 # APPSHEET CONFIG
 # =========================
 APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
-ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
+ACCESS_KEY = "YOUR_ACCESS_KEY"
 TABLE_NAME = "Data TFR"
+
 
 # =========================
 # UPDATE APPSHEET
 # =========================
-def update_appsheet(row_id, volume):
+def update_appsheet(row_id, volume_text):
 
     url = f"https://api.appsheet.com/api/v2/apps/{APP_ID}/tables/{TABLE_NAME}/Action"
 
@@ -29,8 +30,8 @@ def update_appsheet(row_id, volume):
         "Action": "Edit",
         "Rows": [
             {
-                "id": row_id,        # 👈 KEY = AppSheet UNIQUEID column
-                "TFR AI": volume
+                "id": row_id,            # ✔ KEY (UNIQUEID from AppSheet)
+                "TFR AI": volume_text    # ✔ เช่น "71%"
             }
         ]
     }
@@ -52,13 +53,14 @@ def home():
 
 
 # =========================
-# MAIN API
+# PREDICT API
 # =========================
 @app.route("/predict", methods=["POST"])
 def predict():
 
     try:
         data = request.get_json(silent=True)
+
         print("=" * 60)
         print("JSON:", data)
 
@@ -66,7 +68,7 @@ def predict():
             return jsonify({"status": "error", "message": "No JSON"}), 400
 
         image_url = data.get("link")
-        row_id = data.get("id")   # 👈 ใช้ AppSheet UNIQUEID
+        row_id = data.get("id")
 
         print("IMAGE URL:", image_url)
         print("ROW ID:", row_id)
@@ -123,44 +125,33 @@ def predict():
 
         roi[:int(roi.shape[0]*0.12), :] = 0
 
-        roi = cv2.morphologyEx(roi, cv2.MORPH_OPEN, np.ones((5,5), np.uint8))
-        roi = cv2.dilate(roi, np.ones((7,7), np.uint8), 1)
+        roi = cv2.morphologyEx(roi, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+        roi = cv2.dilate(roi, np.ones((7, 7), np.uint8), 1)
 
-# =========================
-# VOLUME
-# =========================
-fill = cv2.countNonZero(roi)
-total = roi.size
+        # =========================
+        # VOLUME CALCULATION
+        # =========================
+        fill = cv2.countNonZero(roi)
+        total = roi.size
 
-volume_percent = int((fill / total) * 100)
+        volume_percent = int((fill / total) * 100)
 
-if volume_percent >= 85:
-    volume_percent = 100
+        if volume_percent >= 85:
+            volume_percent = 100
 
-volume_text = f"{volume_percent}%"
+        volume_text = f"{volume_percent}%"
 
-print("VOLUME:", volume_text)
-
-# =========================
-# UPDATE APPSHEET
-# =========================
-update_appsheet(row_id, volume_text)
-
-return jsonify({
-    "status": "success",
-    "id": row_id,
-    "volume": volume_text
-})
+        print("VOLUME:", volume_text)
 
         # =========================
         # UPDATE APPSHEET
         # =========================
-        update_appsheet(row_id, volume)
+        update_appsheet(row_id, volume_text)
 
         return jsonify({
             "status": "success",
             "id": row_id,
-            "volume": volume
+            "volume": volume_text
         })
 
     except Exception:
@@ -169,7 +160,7 @@ return jsonify({
 
 
 # =========================
-# RUN
+# RUN SERVER
 # =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
