@@ -3,34 +3,31 @@ import requests
 import cv2
 import numpy as np
 import traceback
-import datetime
+import time
+import threading
 
 app = Flask(__name__)
 
-# =========================
-# APPSHEET CONFIG
-# =========================
 APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
 ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
 TABLE_NAME = "Data TFR"
 
+# =========================
+# MEMORY + LOCK (สำคัญมาก)
+# =========================
+processed_ids = set()
+lock = threading.Lock()
 
-# =========================
-# HEALTH CHECK (กัน sleep)
-# =========================
+
 @app.route("/health")
 def health():
-    print("HEALTH CHECK:", datetime.datetime.now())
-    return jsonify({
-        "status": "ok",
-        "service": "TFR AI running"
-    })
+    return jsonify({"status": "ok"})
 
 
 # =========================
-# UPDATE APPSHEET
+# APP SHEET UPDATE
 # =========================
-def update_appsheet(row_id, volume_text):
+def update_appsheet(row_id, volume_text, status="Done"):
 
     url = f"https://api.appsheet.com/api/v2/apps/{APP_ID}/tables/{TABLE_NAME}/Action"
 
@@ -45,29 +42,53 @@ def update_appsheet(row_id, volume_text):
             {
                 "id": row_id,
                 "TFR AI": volume_text,
-                "status": "Done"
+                "status": status
             }
         ]
     }
 
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=30)
-        print("APP SHEET UPDATE:", r.status_code, r.text)
+    for i in range(3):
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=30)
+            print(f"[APP SHEET TRY {i+1}] {r.status_code} {r.text}")
 
-    except Exception as e:
-        print("UPDATE ERROR:", str(e))
+            if r.status_code == 200:
+                return True
+
+        except Exception as e:
+            print("UPDATE ERROR:", str(e))
+            time.sleep(1)
+
+    return False
 
 
 # =========================
-# HOME
+# IMAGE DOWNLOAD
 # =========================
-@app.route("/")
-def home():
-    return "TFR AI Running"
+def download_image(image_url):
+
+    for i in range(3):
+        try:
+            r = requests.get(image_url, timeout=60)
+
+            if r.status_code == 200:
+                img = cv2.imdecode(
+                    np.frombuffer(r.content, np.uint8),
+                    cv2.IMREAD_COLOR
+                )
+                if img is not None:
+                    return img
+
+        except Exception as e:
+            print(f"[DOWNLOAD RETRY {i+1}]", e)
+
+        time.sleep(1)
+
+    return None
 
 
 # =========================
-# PREDICT API
+# MAIN API
 # =========================
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -75,41 +96,36 @@ def predict():
     try:
         data = request.get_json(silent=True)
 
-        print("=" * 60)
-        print("JSON:", data)
-
         if not data:
-            return jsonify({"status": "error", "message": "No JSON"}), 400
+            return jsonify({"error": "no json"}), 400
 
         image_url = data.get("link")
         row_id = data.get("id")
 
         if not image_url or not row_id:
-            return jsonify({"status": "error", "message": "missing data"}), 400
+            return jsonify({"error": "missing data"}), 400
 
         # =========================
-        # DOWNLOAD IMAGE
+        # LOCK กันยิงซ้ำ
         # =========================
-        response = requests.get(
-            image_url,
-            timeout=60,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
+        with lock:
+            if row_id in processed_ids:
+                return jsonify({"status": "skipped"}), 200
+            processed_ids.add(row_id)
 
-        if response.status_code != 200:
-            return jsonify({"status": "error", "message": "download failed"}), 400
+        # =========================
+        # delay กัน image upload ยังไม่เสร็จ
+        # =========================
+        time.sleep(2)
 
-        img = cv2.imdecode(
-            np.frombuffer(response.content, np.uint8),
-            cv2.IMREAD_COLOR
-        )
+        # =========================
+        # IMAGE
+        # =========================
+        img = download_image(image_url)
 
         if img is None:
-            return jsonify({"status": "error", "message": "decode failed"}), 400
+            return jsonify({"error": "image fail"}), 400
 
-        # =========================
-        # PROCESS IMAGE
-        # =========================
         img = cv2.resize(img, (800, 600))
 
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -129,7 +145,6 @@ def predict():
         combined = mask | red | blue | green | white
 
         h, w = combined.shape
-
         roi = combined[int(h*0.18):int(h*0.80), int(w*0.05):int(w*0.95)]
 
         roi[:int(roi.shape[0]*0.12), :] = 0
@@ -137,40 +152,33 @@ def predict():
         roi = cv2.morphologyEx(roi, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
         roi = cv2.dilate(roi, np.ones((7, 7), np.uint8), 1)
 
-        # =========================
-        # VOLUME
-        # =========================
         fill = cv2.countNonZero(roi)
         total = roi.size
 
-        volume_percent = int((fill / total) * 100)
+        volume = int((fill / total) * 100)
 
-        if volume_percent >= 85:
-            volume_percent = 100
+        if volume >= 85:
+            volume = 100
 
-        volume_text = f"{volume_percent}%"
+        volume_text = f"{volume}%"
 
         print("VOLUME:", volume_text)
 
         # =========================
-        # UPDATE APPSHEET
+        # UPDATE
         # =========================
         update_appsheet(row_id, volume_text)
 
         return jsonify({
             "status": "success",
             "id": row_id,
-            "TFR AI": volume_text,
-            "app_status": "Done"
+            "volume": volume_text
         })
 
     except Exception:
         print(traceback.format_exc())
-        return jsonify({"status": "error"}), 500
+        return jsonify({"error": "server error"}), 500
 
 
-# =========================
-# RUN
-# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
