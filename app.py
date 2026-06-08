@@ -3,6 +3,7 @@ import requests
 import cv2
 import numpy as np
 import traceback
+import datetime
 
 app = Flask(__name__)
 
@@ -12,6 +13,18 @@ app = Flask(__name__)
 APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
 ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
 TABLE_NAME = "Data TFR"
+
+
+# =========================
+# HEALTH CHECK (กัน sleep)
+# =========================
+@app.route("/health")
+def health():
+    print("HEALTH CHECK:", datetime.datetime.now())
+    return jsonify({
+        "status": "ok",
+        "service": "TFR AI running"
+    })
 
 
 # =========================
@@ -30,9 +43,9 @@ def update_appsheet(row_id, volume_text):
         "Action": "Edit",
         "Rows": [
             {
-                "id": row_id,            # KEY
-                "TFR AI": volume_text,   # % result
-                "status": "Done"         # FINAL STATUS
+                "id": row_id,
+                "TFR AI": volume_text,
+                "status": "Done"
             }
         ]
     }
@@ -71,9 +84,6 @@ def predict():
         image_url = data.get("link")
         row_id = data.get("id")
 
-        print("IMAGE URL:", image_url)
-        print("ROW ID:", row_id)
-
         if not image_url or not row_id:
             return jsonify({"status": "error", "message": "missing data"}), 400
 
@@ -96,8 +106,6 @@ def predict():
 
         if img is None:
             return jsonify({"status": "error", "message": "decode failed"}), 400
-
-        print("IMAGE OK")
 
         # =========================
         # PROCESS IMAGE
@@ -149,9 +157,6 @@ def predict():
         # =========================
         update_appsheet(row_id, volume_text)
 
-        # =========================
-        # RESPONSE
-        # =========================
         return jsonify({
             "status": "success",
             "id": row_id,
