@@ -3,33 +3,31 @@ import requests
 import cv2
 import numpy as np
 import traceback
-import os
-import joblib
-from sklearn.linear_model import SGDRegressor
+import time
+import threading
 
 app = Flask(__name__)
 
 # =========================
-# MODEL FILE
+# APPSHEET CONFIG
 # =========================
-MODEL_PATH = "tfr_regression.pkl"
+APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
+ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
+TABLE_NAME = "Data TFR"
 
-if os.path.exists(MODEL_PATH):
-    model = joblib.load(MODEL_PATH)
-else:
-    model = SGDRegressor(
-        learning_rate="constant",
-        eta0=0.01,
-        max_iter=1,
-        warm_start=True
-    )
+# =========================
+# LOCK
+# =========================
+processed_ids = set()
+lock = threading.Lock()
+
 
 # =========================
 # DOWNLOAD IMAGE
 # =========================
 def download_image(url):
     try:
-        r = requests.get(url, timeout=(5, 10))
+        r = requests.get(url, timeout=15)
         if r.status_code != 200:
             return None
 
@@ -43,57 +41,130 @@ def download_image(url):
 
 
 # =========================
-# FEATURE EXTRACTION
+# 🔥 BALANCED VOLUME MODEL
 # =========================
-def extract_features(img):
+def gen_volume(img):
 
     img = cv2.resize(img, (640, 480))
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hsv = cv2.GaussianBlur(hsv, (5, 5), 0)
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # =========================
+    # COLOR MASK (balanced)
+    # =========================
     mask = (
-        cv2.inRange(hsv, (10, 30, 60), (40, 255, 255)) |
-        cv2.inRange(hsv, (0, 50, 50), (10, 255, 255)) |
-        cv2.inRange(hsv, (160, 50, 50), (180, 255, 255)) |
-        cv2.inRange(hsv, (90, 40, 40), (130, 255, 255))
+        cv2.inRange(hsv, (10, 35, 60), (40, 255, 255)) |
+        cv2.inRange(hsv, (0, 60, 50), (10, 255, 255)) |
+        cv2.inRange(hsv, (160, 60, 50), (180, 255, 255)) |
+        cv2.inRange(hsv, (90, 50, 50), (130, 255, 255))
     )
 
+    # =========================
+    # MORPH CLEAN
+    # =========================
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
     h, w = mask.shape
-    roi = mask[int(h*0.10):int(h*0.95), int(w*0.02):int(w*0.98)]
+
+    # =========================
+    # ROI (clean truck interior only)
+    # =========================
+    roi = mask[int(h*0.18):int(h*0.90), int(w*0.04):int(w*0.96)]
 
     if roi.size == 0:
-        return np.zeros(4)
+        return 0
 
-    area = np.mean(roi > 0)
+    # =========================
+    # AREA DENSITY
+    # =========================
+    area_density = np.count_nonzero(roi) / roi.size
+    area_density = np.clip(area_density, 0, 1)
 
-    top = np.mean(roi[:int(roi.shape[0]*0.3), :] > 0)
-    mid = np.mean(roi[int(roi.shape[0]*0.3):int(roi.shape[0]*0.7), :] > 0)
-    bottom = np.mean(roi[int(roi.shape[0]*0.7):, :] > 0)
+    # =========================
+    # VERTICAL SIGNAL
+    # =========================
+    v_proj = np.sum(roi, axis=1)
+    v_norm = v_proj / (np.max(v_proj) + 1e-6)
+    v_score = np.mean(v_norm > 0.10)
 
-    return np.array([area, top, mid, bottom])
+    # =========================
+    # HORIZONTAL SIGNAL
+    # =========================
+    h_proj = np.sum(roi, axis=0)
+    h_norm = h_proj / (np.max(h_proj) + 1e-6)
+    h_score = np.mean(h_norm > 0.10)
+
+    # =========================
+    # BASE VOLUME (BALANCED WEIGHTS)
+    # =========================
+    volume = (
+        area_density * 100 * 0.80 +
+        v_score * 100 * 0.12 +
+        h_score * 100 * 0.08
+    )
+
+    # =========================
+    # NON-LINEAR CALIBRATION
+    # =========================
+    if volume < 30:
+        volume *= 1.10
+    elif volume > 75:
+        volume *= 0.95
+
+    # =========================
+    # LOW DENSITY FIX
+    # =========================
+    if area_density < 0.12:
+        volume *= 0.85
+
+    # =========================
+    # FINAL NORMALIZE
+    # =========================
+    volume = int(round(volume / 5) * 5)
+    volume = max(0, min(100, volume))
+
+    return volume
 
 
 # =========================
-# PREDICT
+# UPDATE APPSHEET
 # =========================
-def predict(features):
-    return model.predict([features])[0]
+def update_appsheet(row_id, volume_text):
 
+    url = f"https://api.appsheet.com/api/v2/apps/{APP_ID}/tables/{TABLE_NAME}/Action"
 
-# =========================
-# TRAIN
-# =========================
-def train(features, actual):
+    headers = {
+        "ApplicationAccessKey": ACCESS_KEY,
+        "Content-Type": "application/json"
+    }
 
-    model.partial_fit([features], [actual])
+    payload = {
+        "Action": "Edit",
+        "Rows": [
+            {
+                "id": row_id,
+                "TFR AI": volume_text,
+                "status": "Done"
+            }
+        ]
+    }
 
-    joblib.dump(model, MODEL_PATH)
+    try:
+        requests.post(url, json=payload, headers=headers, timeout=20)
+    except:
+        pass
 
 
 # =========================
 # API ENDPOINT
 # =========================
 @app.route("/predict", methods=["POST"])
-def predict_api():
+def predict():
 
     try:
         data = request.get_json(silent=True)
@@ -102,42 +173,44 @@ def predict_api():
             return jsonify({"error": "no json"}), 400
 
         image_url = data.get("link")
-        actual = data.get("actual")  # จาก AppSheet (%Fill Rate)
+        row_id = data.get("id")
 
-        if not image_url:
-            return jsonify({"error": "missing link"}), 400
+        if not image_url or not row_id:
+            return jsonify({"error": "missing data"}), 400
 
         # =========================
-        # LOAD IMAGE
+        # DUPLICATE LOCK
+        # =========================
+        with lock:
+            if row_id in processed_ids:
+                return jsonify({"status": "skipped"}), 200
+            processed_ids.add(row_id)
+
+        # =========================
+        # IMAGE LOAD
         # =========================
         img = download_image(image_url)
+
         if img is None:
             return jsonify({"error": "image fail"}), 400
 
         # =========================
-        # FEATURES
+        # AI PROCESS
         # =========================
-        features = extract_features(img)
+        volume = gen_volume(img)
+        volume_text = f"{volume}%"
+
+        print("VOLUME:", volume_text)
 
         # =========================
-        # PREDICT
+        # UPDATE SHEET
         # =========================
-        pred = predict(features)
-        pred = max(0, min(100, pred))
-        pred_out = int(round(pred / 5) * 5)
-
-        # =========================
-        # ONLINE TRAINING
-        # =========================
-        if actual is not None:
-            try:
-                train(features, float(actual))
-            except:
-                pass
+        update_appsheet(row_id, volume_text)
 
         return jsonify({
             "status": "success",
-            "pred": pred_out
+            "id": row_id,
+            "volume": volume_text
         })
 
     except:
@@ -146,23 +219,7 @@ def predict_api():
 
 
 # =========================
-# HEALTH CHECK
-# =========================
-@app.route("/")
-def home():
-    return "TFR Regression AI OK", 200
-
-
-@app.route("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "model": "sgd-regression"
-    }), 200
-
-
-# =========================
-# RUN
+# RUN SERVER
 # =========================
 if __name__ == "__main__":
     app.run(
