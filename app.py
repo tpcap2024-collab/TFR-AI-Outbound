@@ -15,9 +15,8 @@ ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
 TABLE_NAME = "Data TFR"
 
 # =========================
-# MEMORY (SELF-LEARNING BIAS)
+# MEMORY
 # =========================
-error_history = []
 lock = threading.Lock()
 processed_ids = set()
 
@@ -41,15 +40,20 @@ def download_image(url):
 
 
 # =========================
-# RAW VOLUME MODEL (NO BIAS FIX)
+# 🔥 FINAL VOLUME MODEL (FIXED UNDER + OVER BALANCE)
 # =========================
-def gen_volume_raw(img):
+def gen_volume(img):
 
     img = cv2.resize(img, (640, 480))
 
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     hsv = cv2.GaussianBlur(hsv, (5, 5), 0)
 
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # =========================
+    # COLOR MASK (tight but stable)
+    # =========================
     mask = (
         cv2.inRange(hsv, (10, 35, 60), (40, 255, 255)) |
         cv2.inRange(hsv, (0, 60, 50), (10, 255, 255)) |
@@ -57,56 +61,76 @@ def gen_volume_raw(img):
         cv2.inRange(hsv, (90, 50, 50), (130, 255, 255))
     )
 
+    # =========================
+    # MORPH CLEAN
+    # =========================
     kernel = np.ones((5, 5), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
     h, w = mask.shape
 
-    # ROI (truck interior only)
-    roi = mask[int(h*0.12):int(h*0.92), int(w*0.03):int(w*0.97)]
+    # =========================
+    # ROI (expand to fix under-estimate)
+    # =========================
+    roi = mask[int(h*0.10):int(h*0.94), int(w*0.02):int(w*0.98)]
 
     if roi.size == 0:
         return 0
 
+    # =========================
+    # AREA DENSITY
+    # =========================
     area_density = np.count_nonzero(roi) / roi.size
     area_density = np.clip(area_density, 0, 1)
 
-    volume = area_density * 100
+    # =========================
+    # EDGE DENSITY (FIX 100% LOAD PROBLEM)
+    # =========================
+    edges = cv2.Canny(gray, 50, 150)
+    edge_roi = edges[int(h*0.10):int(h*0.94), int(w*0.02):int(w*0.98)]
+    edge_density = np.count_nonzero(edge_roi) / edge_roi.size
+    edge_density = np.clip(edge_density, 0, 1)
+
+    # =========================
+    # VERTICAL SIGNAL
+    # =========================
+    v_proj = np.sum(roi, axis=1)
+    v_norm = v_proj / (np.max(v_proj) + 1e-6)
+    v_score = np.mean(v_norm > 0.08)
+
+    # =========================
+    # HORIZONTAL SIGNAL
+    # =========================
+    h_proj = np.sum(roi, axis=0)
+    h_norm = h_proj / (np.max(h_proj) + 1e-6)
+    h_score = np.mean(h_norm > 0.08)
+
+    # =========================
+    # BASE MODEL (BALANCED)
+    # =========================
+    volume = (
+        area_density * 100 * 0.60 +
+        edge_density * 100 * 0.25 +
+        v_score * 100 * 0.10 +
+        h_score * 100 * 0.05
+    )
+
+    # =========================
+    # FIX UNDER-ESTIMATE (IMPORTANT)
+    # =========================
+    if volume > 80:
+        volume *= 1.08
+    elif volume < 30:
+        volume *= 1.05
+
+    # =========================
+    # FINAL CLAMP
+    # =========================
+    volume = int(round(volume / 5) * 5)
+    volume = max(0, min(100, volume))
 
     return volume
-
-
-# =========================
-# SELF CALIBRATION (BIAS CORRECTION)
-# =========================
-def calibrate(volume):
-
-    global error_history
-
-    if len(error_history) > 0:
-        bias = np.mean(error_history[-30:])  # rolling window
-    else:
-        bias = 0
-
-    corrected = volume + bias
-
-    return max(0, min(100, corrected))
-
-
-# =========================
-# LEARNING SYSTEM
-# =========================
-def update_bias(pred, actual):
-
-    global error_history
-
-    error = actual - pred
-    error_history.append(error)
-
-    # limit memory
-    if len(error_history) > 300:
-        error_history = error_history[-300:]
 
 
 # =========================
@@ -139,7 +163,7 @@ def update_appsheet(row_id, volume_text):
 
 
 # =========================
-# API ENDPOINT
+# API
 # =========================
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -157,7 +181,7 @@ def predict():
             return jsonify({"error": "missing data"}), 400
 
         # =========================
-        # DUPLICATE LOCK
+        # LOCK
         # =========================
         with lock:
             if row_id in processed_ids:
@@ -165,40 +189,27 @@ def predict():
             processed_ids.add(row_id)
 
         # =========================
-        # IMAGE LOAD
+        # IMAGE
         # =========================
         img = download_image(image_url)
         if img is None:
             return jsonify({"error": "image fail"}), 400
 
         # =========================
-        # MODEL
+        # AI
         # =========================
-        raw = gen_volume_raw(img)
-        corrected = calibrate(raw)
-
-        volume = int(round(corrected / 5) * 5)
-        volume = max(0, min(100, volume))
-
-        # =========================
-        # OPTIONAL LEARNING (if ground truth exists)
-        # =========================
-        actual = data.get("actual")
-        if actual is not None:
-            update_bias(volume, float(actual))
-
+        volume = gen_volume(img)
         volume_text = f"{volume}%"
 
-        print(f"RAW: {raw:.2f} → FINAL: {volume_text}")
+        print("TFR AI:", volume_text)
 
         # =========================
-        # UPDATE SHEET
+        # UPDATE
         # =========================
         update_appsheet(row_id, volume_text)
 
         return jsonify({
             "status": "success",
-            "raw": raw,
             "volume": volume_text
         })
 
@@ -208,7 +219,7 @@ def predict():
 
 
 # =========================
-# RUN SERVER
+# RUN
 # =========================
 if __name__ == "__main__":
     app.run(
