@@ -3,45 +3,41 @@ import requests
 import cv2
 import numpy as np
 import traceback
-import threading
-import pickle
 import os
-from queue import Queue
+import joblib
+from sklearn.linear_model import SGDRegressor
 
 app = Flask(__name__)
 
 # =========================
-# MODEL STORAGE
+# MODEL FILE
 # =========================
-MODEL_PATH = "tfr_model.pkl"
+MODEL_PATH = "tfr_regression.pkl"
 
 if os.path.exists(MODEL_PATH):
-    model = pickle.load(open(MODEL_PATH, "rb"))
+    model = joblib.load(MODEL_PATH)
 else:
-    model = {
-        "w": np.array([1.0, 1.0, 1.0, 1.0]),
-        "b": 0.0
-    }
-
-# =========================
-# QUEUE (NON-BLOCK TRAINING)
-# =========================
-train_queue = Queue()
-
+    model = SGDRegressor(
+        learning_rate="constant",
+        eta0=0.01,
+        max_iter=1,
+        warm_start=True
+    )
 
 # =========================
 # DOWNLOAD IMAGE
 # =========================
 def download_image(url):
     try:
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=(5, 10))
         if r.status_code != 200:
             return None
 
-        return cv2.imdecode(
+        img = cv2.imdecode(
             np.frombuffer(r.content, np.uint8),
             cv2.IMREAD_COLOR
         )
+        return img
     except:
         return None
 
@@ -62,80 +58,39 @@ def extract_features(img):
     )
 
     h, w = mask.shape
-    roi = mask[int(h*0.08):int(h*0.95), int(w*0.02):int(w*0.98)]
+    roi = mask[int(h*0.10):int(h*0.95), int(w*0.02):int(w*0.98)]
 
     if roi.size == 0:
         return np.zeros(4)
 
     area = np.mean(roi > 0)
 
-    top = roi[:int(roi.shape[0]*0.3), :]
-    mid = roi[int(roi.shape[0]*0.3):int(roi.shape[0]*0.7), :]
-    bottom = roi[int(roi.shape[0]*0.7):, :]
+    top = np.mean(roi[:int(roi.shape[0]*0.3), :] > 0)
+    mid = np.mean(roi[int(roi.shape[0]*0.3):int(roi.shape[0]*0.7), :] > 0)
+    bottom = np.mean(roi[int(roi.shape[0]*0.7):, :] > 0)
 
-    return np.array([
-        area,
-        np.mean(top > 0),
-        np.mean(mid > 0),
-        np.mean(bottom > 0)
-    ])
+    return np.array([area, top, mid, bottom])
 
 
 # =========================
-# PREDICT MODEL
+# PREDICT
 # =========================
 def predict(features):
-    return float(np.dot(model["w"], features) + model["b"])
+    return model.predict([features])[0]
 
 
 # =========================
-# TRAIN MODEL
+# TRAIN
 # =========================
-def train_model(features, actual, pred, lr=0.03):
+def train(features, actual):
 
-    error = actual - pred
+    model.partial_fit([features], [actual])
 
-    model["w"] += lr * error * features
-    model["b"] += lr * error
-
-
-# =========================
-# SAVE MODEL
-# =========================
-def save_model():
-    with open(MODEL_PATH, "wb") as f:
-        pickle.dump(model, f)
+    joblib.dump(model, MODEL_PATH)
 
 
 # =========================
-# BACKGROUND TRAIN WORKER
-# =========================
-def train_worker():
-
-    while True:
-
-        item = train_queue.get()
-
-        if item is None:
-            break
-
-        features, actual, pred = item
-
-        try:
-            train_model(features, actual, pred)
-            save_model()
-        except:
-            pass
-
-        train_queue.task_done()
-
-
-# start worker thread
-threading.Thread(target=train_worker, daemon=True).start()
-
-
-# =========================
-# API
+# API ENDPOINT
 # =========================
 @app.route("/predict", methods=["POST"])
 def predict_api():
@@ -143,11 +98,14 @@ def predict_api():
     try:
         data = request.get_json(silent=True)
 
-        image_url = data.get("link")
-        row_id = data.get("id")
+        if not data:
+            return jsonify({"error": "no json"}), 400
 
-        if not image_url or not row_id:
-            return jsonify({"error": "missing data"}), 400
+        image_url = data.get("link")
+        actual = data.get("actual")  # จาก AppSheet (%Fill Rate)
+
+        if not image_url:
+            return jsonify({"error": "missing link"}), 400
 
         # =========================
         # LOAD IMAGE
@@ -169,15 +127,11 @@ def predict_api():
         pred_out = int(round(pred / 5) * 5)
 
         # =========================
-        # NON-BLOCK LEARNING
+        # ONLINE TRAINING
         # =========================
-        actual = data.get("actual")
-
         if actual is not None:
             try:
-                train_queue.put_nowait(
-                    (features, float(actual), pred)
-                )
+                train(features, float(actual))
             except:
                 pass
 
@@ -192,7 +146,23 @@ def predict_api():
 
 
 # =========================
-# RUN SERVER
+# HEALTH CHECK
+# =========================
+@app.route("/")
+def home():
+    return "TFR Regression AI OK", 200
+
+
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "model": "sgd-regression"
+    }), 200
+
+
+# =========================
+# RUN
 # =========================
 if __name__ == "__main__":
     app.run(
