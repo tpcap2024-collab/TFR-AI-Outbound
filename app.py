@@ -72,9 +72,10 @@ def gen_volume(img):
     h, w = mask.shape
 
     # =========================
-    # ROI (clean truck interior only)
+    # ROI
     # =========================
-    roi = mask[int(h*0.18):int(h*0.90), int(w*0.04):int(w*0.96)]
+    roi = mask[int(h*0.18):int(h*0.90),
+               int(w*0.04):int(w*0.96)]
 
     if roi.size == 0:
         return 0
@@ -100,7 +101,7 @@ def gen_volume(img):
     h_score = np.mean(h_norm > 0.10)
 
     # =========================
-    # BASE VOLUME (BALANCED WEIGHTS)
+    # BASE VOLUME
     # =========================
     volume = (
         area_density * 100 * 0.80 +
@@ -126,6 +127,11 @@ def gen_volume(img):
     # FINAL NORMALIZE
     # =========================
     volume = int(round(volume / 5) * 5)
+
+    # เพิ่มอีก 20%
+    volume += 20
+
+    # จำกัดไม่เกิน 100%
     volume = max(0, min(100, volume))
 
     return volume
