@@ -135,8 +135,9 @@ def gen_volume(img):
     volume = max(0, min(100, volume))
 
     print(
-        f"EDGE={edge_density:.3f} "
-        f"TEXTURE={texture_density:.3f} "
+        f"EDGE={edge_density:.4f} "
+        f"TEXTURE={texture_density:.4f} "
+        f"SCORE={score:.4f} "
         f"VOL={volume}%"
     )
 
