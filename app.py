@@ -46,22 +46,87 @@ def download_image(url):
 def gen_volume(img):
 
     # =========================
+    # DETECT VIEW TYPE
+    # =========================
+    orig_h, orig_w = img.shape[:2]
+
+    if orig_h > orig_w:
+        view_type = "rear"
+    else:
+        view_type = "side"
+
+    # =========================
     # RESIZE
     # =========================
     img = cv2.resize(img, (640, 480))
 
+    # =========================
+    # SIDE VIEW
+    # 4:3 -> 16:9
+    # =========================
+    if view_type == "side":
+
+        h, w = img.shape[:2]
+
+        target_h = int(w * 9 / 16)
+
+        top = (h - target_h) // 2
+
+        img = img[
+            top:top + target_h,
+            :
+        ]
+
     h, w = img.shape[:2]
+
+    print(
+        f"VIEW={view_type} "
+        f"SIZE={w}x{h}"
+    )
 
     # =========================
     # ROI
     # =========================
-    roi = img[
-        int(h * 0.20):int(h * 0.85),
-        int(w * 0.10):int(w * 0.90)
-    ]
+    if view_type == "rear":
+
+        roi = img[
+            int(h * 0.18):int(h * 0.82),
+            int(w * 0.15):int(w * 0.85)
+        ]
+
+    else:
+
+        roi = img[
+            int(h * 0.15):int(h * 0.85),
+            int(w * 0.08):int(w * 0.92)
+        ]
 
     if roi.size == 0:
         return 0
+
+    # =========================
+    # DEBUG ROI
+    # =========================
+    debug = img.copy()
+
+    x1 = int(w * 0.15) if view_type == "rear" else int(w * 0.08)
+    x2 = int(w * 0.85) if view_type == "rear" else int(w * 0.92)
+
+    y1 = int(h * 0.18) if view_type == "rear" else int(h * 0.15)
+    y2 = int(h * 0.82) if view_type == "rear" else int(h * 0.85)
+
+    cv2.rectangle(
+        debug,
+        (x1, y1),
+        (x2, y2),
+        (0, 255, 0),
+        3
+    )
+
+    cv2.imwrite(
+        f"debug_roi_{view_type}.jpg",
+        debug
+    )
 
     # =========================
     # GRAYSCALE
@@ -113,28 +178,21 @@ def gen_volume(img):
     )
 
     # =========================
-    # COMBINED SCORE
+    # SCORE
     # =========================
     score = (
         edge_density * 0.75 +
         texture_density * 0.25
     )
 
-    # =========================
-    # SCALE TO %
-    # =========================
     volume = int(score * 800)
-
-    # =========================
-    # CALIBRATION
-    # =========================
-
 
     volume = int(round(volume / 5) * 5)
 
     volume = max(0, min(100, volume))
 
     print(
+        f"VIEW={view_type} "
         f"EDGE={edge_density:.4f} "
         f"TEXTURE={texture_density:.4f} "
         f"SCORE={score:.4f} "
