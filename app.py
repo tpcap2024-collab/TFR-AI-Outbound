@@ -45,80 +45,85 @@ def download_image(url):
 # =========================
 def gen_volume(img):
 
+    # =========================
+    # RESIZE
+    # =========================
     img = cv2.resize(img, (640, 480))
 
     h, w = img.shape[:2]
 
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-    # =========================
-    # DETECT VIEW TYPE
-    # =========================
-    if h >= w:
-        view_type = "rear"
-    else:
-        view_type = "side"
-
     # =========================
     # ROI
     # =========================
-    if view_type == "rear":
-
-        roi = hsv[
-            int(h * 0.18):int(h * 0.82),
-            int(w * 0.12):int(w * 0.88)
-        ]
-
-    else:
-
-        roi = hsv[
-            int(h * 0.10):int(h * 0.85),
-            int(w * 0.08):int(w * 0.92)
-        ]
+    roi = img[
+        int(h * 0.20):int(h * 0.85),
+        int(w * 0.10):int(w * 0.90)
+    ]
 
     if roi.size == 0:
         return 0
 
     # =========================
-    # EMPTY SPACE
+    # GRAYSCALE
     # =========================
-    empty_mask = cv2.inRange(
+    gray = cv2.cvtColor(
         roi,
-        (0, 0, 120),
-        (180, 60, 255)
+        cv2.COLOR_BGR2GRAY
+    )
+
+    gray = cv2.GaussianBlur(
+        gray,
+        (5, 5),
+        0
     )
 
     # =========================
-    # CLEAN
+    # EDGE DENSITY
     # =========================
-    kernel = np.ones((5, 5), np.uint8)
-
-    empty_mask = cv2.morphologyEx(
-        empty_mask,
-        cv2.MORPH_OPEN,
-        kernel
+    edges = cv2.Canny(
+        gray,
+        50,
+        150
     )
 
-    empty_mask = cv2.morphologyEx(
-        empty_mask,
+    kernel = np.ones((3, 3), np.uint8)
+
+    edges = cv2.morphologyEx(
+        edges,
         cv2.MORPH_CLOSE,
         kernel
     )
 
-    # =========================
-    # EMPTY RATIO
-    # =========================
-    empty_ratio = (
-        np.count_nonzero(empty_mask)
-        / empty_mask.size
+    edge_density = (
+        np.count_nonzero(edges)
+        / edges.size
     )
 
     # =========================
-    # LOAD
+    # TEXTURE DENSITY
     # =========================
-    load_ratio = 1 - empty_ratio
+    lap = cv2.Laplacian(
+        gray,
+        cv2.CV_64F
+    )
 
-    volume = int(load_ratio * 100)
+    texture_density = (
+        np.mean(np.abs(lap))
+        / 255.0
+    )
+
+    # =========================
+    # COMBINED SCORE
+    # =========================
+    score = (
+        edge_density * 0.75 +
+        texture_density * 0.25
+    )
+
+    # =========================
+    # SCALE TO %
+    # =========================
+    volume = int(score * 350)
 
     # =========================
     # CALIBRATION
@@ -134,9 +139,9 @@ def gen_volume(img):
     volume = max(0, min(100, volume))
 
     print(
-        f"VIEW={view_type} "
-        f"EMPTY={empty_ratio:.2f} "
-        f"LOAD={volume}%"
+        f"EDGE={edge_density:.3f} "
+        f"TEXTURE={texture_density:.3f} "
+        f"VOL={volume}%"
     )
 
     return volume
