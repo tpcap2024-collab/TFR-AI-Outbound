@@ -47,92 +47,97 @@ def gen_volume(img):
 
     img = cv2.resize(img, (640, 480))
 
+    h, w = img.shape[:2]
+
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    hsv = cv2.GaussianBlur(hsv, (5, 5), 0)
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     # =========================
-    # COLOR MASK (balanced)
+    # DETECT VIEW TYPE
     # =========================
-    mask = (
-        cv2.inRange(hsv, (10, 35, 60), (40, 255, 255)) |
-        cv2.inRange(hsv, (0, 60, 50), (10, 255, 255)) |
-        cv2.inRange(hsv, (160, 60, 50), (180, 255, 255)) |
-        cv2.inRange(hsv, (90, 50, 50), (130, 255, 255))
-    )
-
-    # =========================
-    # MORPH CLEAN
-    # =========================
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-    h, w = mask.shape
+    if h >= w:
+        view_type = "rear"
+    else:
+        view_type = "side"
 
     # =========================
     # ROI
     # =========================
-    roi = mask[int(h*0.18):int(h*0.90),
-               int(w*0.04):int(w*0.96)]
+    if view_type == "rear":
+
+        roi = hsv[
+            int(h * 0.18):int(h * 0.82),
+            int(w * 0.12):int(w * 0.88)
+        ]
+
+    else:
+
+        roi = hsv[
+            int(h * 0.10):int(h * 0.85),
+            int(w * 0.08):int(w * 0.92)
+        ]
 
     if roi.size == 0:
         return 0
 
     # =========================
-    # AREA DENSITY
+    # EMPTY SPACE
     # =========================
-    area_density = np.count_nonzero(roi) / roi.size
-    area_density = np.clip(area_density, 0, 1)
-
-    # =========================
-    # VERTICAL SIGNAL
-    # =========================
-    v_proj = np.sum(roi, axis=1)
-    v_norm = v_proj / (np.max(v_proj) + 1e-6)
-    v_score = np.mean(v_norm > 0.10)
-
-    # =========================
-    # HORIZONTAL SIGNAL
-    # =========================
-    h_proj = np.sum(roi, axis=0)
-    h_norm = h_proj / (np.max(h_proj) + 1e-6)
-    h_score = np.mean(h_norm > 0.10)
-
-    # =========================
-    # BASE VOLUME
-    # =========================
-    volume = (
-        area_density * 100 * 0.80 +
-        v_score * 100 * 0.12 +
-        h_score * 100 * 0.08
+    empty_mask = cv2.inRange(
+        roi,
+        (0, 0, 120),
+        (180, 60, 255)
     )
 
     # =========================
-    # NON-LINEAR CALIBRATION
+    # CLEAN
     # =========================
-    if volume < 30:
-        volume *= 1.10
-    elif volume > 75:
-        volume *= 0.95
+    kernel = np.ones((5, 5), np.uint8)
+
+    empty_mask = cv2.morphologyEx(
+        empty_mask,
+        cv2.MORPH_OPEN,
+        kernel
+    )
+
+    empty_mask = cv2.morphologyEx(
+        empty_mask,
+        cv2.MORPH_CLOSE,
+        kernel
+    )
 
     # =========================
-    # LOW DENSITY FIX
+    # EMPTY RATIO
     # =========================
-    if area_density < 0.12:
-        volume *= 0.85
+    empty_ratio = (
+        np.count_nonzero(empty_mask)
+        / empty_mask.size
+    )
 
     # =========================
-    # FINAL NORMALIZE
+    # LOAD
     # =========================
+    load_ratio = 1 - empty_ratio
+
+    volume = int(load_ratio * 100)
+
+    # =========================
+    # CALIBRATION
+    # =========================
+    if volume < 20:
+        volume *= 0.8
+
+    elif volume > 80:
+        volume *= 1.1
+
     volume = int(round(volume / 5) * 5)
 
-    # เพิ่มอีก 20%
-    volume += 20
-
-    # จำกัดไม่เกิน 100%
     volume = max(0, min(100, volume))
+
+    print(
+        f"VIEW={view_type} "
+        f"EMPTY={empty_ratio:.2f} "
+        f"LOAD={volume}%"
+    )
 
     return volume
 
