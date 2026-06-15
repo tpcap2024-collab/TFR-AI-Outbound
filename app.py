@@ -116,35 +116,6 @@ def gen_volume(img):
     )
 
     # =========================
-    # OCCUPANCY RATIO
-    # =========================
-    _, occ_mask = cv2.threshold(
-        gray,
-        100,
-        255,
-        cv2.THRESH_BINARY_INV
-    )
-
-    kernel_occ = np.ones((5, 5), np.uint8)
-
-    occ_mask = cv2.morphologyEx(
-        occ_mask,
-        cv2.MORPH_OPEN,
-        kernel_occ
-    )
-
-    occ_mask = cv2.morphologyEx(
-        occ_mask,
-        cv2.MORPH_CLOSE,
-        kernel_occ
-    )
-
-    occupancy = (
-        np.count_nonzero(occ_mask)
-        / occ_mask.size
-    )
-
-    # =========================
     # EDGE DENSITY
     # =========================
     edges = cv2.Canny(
@@ -183,9 +154,8 @@ def gen_volume(img):
     # SCORE
     # =========================
     score = (
-        occupancy * 0.60 +
-        edge_density * 0.25 +
-        texture_density * 0.15
+        edge_density * 0.75 +
+        texture_density * 0.25
     )
 
     # =========================
@@ -193,11 +163,13 @@ def gen_volume(img):
     # =========================
     if view_type == "rear":
 
-        volume = int(score * 300)
+        # แนวตั้ง (สูตรเดิม)
+        volume = int(score * 800)
 
     else:
 
-        volume = int(score * 250)
+        # แนวนอน (ลด Scale)
+        volume = int(score * 350)
 
     volume = int(round(volume / 5) * 5)
 
@@ -205,7 +177,6 @@ def gen_volume(img):
 
     print(
         f"VIEW={view_type} "
-        f"OCC={occupancy:.4f} "
         f"EDGE={edge_density:.4f} "
         f"TEXTURE={texture_density:.4f} "
         f"SCORE={score:.4f} "
@@ -213,6 +184,7 @@ def gen_volume(img):
     )
 
     return volume
+
 
 # =========================
 # UPDATE APPSHEET
