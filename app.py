@@ -87,8 +87,8 @@ def gen_volume(img):
     if view_type == "rear":
 
         roi = img[
-            int(h * 0.18):int(h * 0.82),
-            int(w * 0.15):int(w * 0.85)
+            int(h * 0.30):int(h * 0.88),
+            int(w * 0.88):int(w * 0.78)
         ]
 
     else:
