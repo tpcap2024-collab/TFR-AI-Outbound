@@ -193,11 +193,11 @@ def gen_volume(img):
     # =========================
     if view_type == "rear":
 
-        volume = int(score * 800)
+        volume = int(score * 300)
 
     else:
 
-        volume = int(score * 350)
+        volume = int(score * 250)
 
     volume = int(round(volume / 5) * 5)
 
