@@ -120,7 +120,7 @@ def gen_volume(img):
     # =========================
     _, occ_mask = cv2.threshold(
         gray,
-        180,
+        100,
         255,
         cv2.THRESH_BINARY_INV
     )
