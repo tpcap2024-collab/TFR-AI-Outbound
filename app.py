@@ -88,7 +88,7 @@ def gen_volume(img):
 
         roi = img[
             int(h * 0.30):int(h * 0.88),
-            int(w * 0.88):int(w * 0.78)
+            int(w * 0.22):int(w * 0.78)
         ]
 
     else:
