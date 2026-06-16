@@ -46,16 +46,6 @@ def download_image(url):
 def gen_volume(img):
 
     # =========================
-    # DETECT VIEW TYPE
-    # =========================
-    orig_h, orig_w = img.shape[:2]
-
-    if orig_h > orig_w:
-        view_type = "rear"
-    else:
-        view_type = "side"
-
-    # =========================
     # RESIZE
     # =========================
     img = cv2.resize(img, (640, 480))
@@ -70,10 +60,10 @@ def gen_volume(img):
     h, w = img.shape[:2]
 
     # =========================
-    # ROI
+    # ROI (กลางภาพ)
     # =========================
     roi = img[
-        int(h * 0.10):int(h * 0.90),
+        int(h * 0.08):int(h * 0.90),
         int(w * 0.05):int(w * 0.95)
     ]
 
@@ -81,100 +71,92 @@ def gen_volume(img):
         return 0
 
     # =========================
-    # GRAY
+    # HSV
     # =========================
-    gray = cv2.cvtColor(
+    hsv = cv2.cvtColor(
         roi,
-        cv2.COLOR_BGR2GRAY
+        cv2.COLOR_BGR2HSV
     )
 
     # =========================
-    # BLUR
+    # EMPTY SPACE MASK
+    # ผนัง/เพดาน สีอ่อน
     # =========================
-    gray = cv2.GaussianBlur(
-        gray,
-        (5, 5),
-        0
+    lower = np.array([0, 0, 90])
+    upper = np.array([180, 70, 255])
+
+    empty_mask = cv2.inRange(
+        hsv,
+        lower,
+        upper
     )
 
     # =========================
-    # THRESHOLD
+    # CLEAN MASK
     # =========================
-    th = cv2.adaptiveThreshold(
-        gray,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        31,
-        8
-    )
+    kernel = np.ones((7, 7), np.uint8)
 
-    # =========================
-    # MORPHOLOGY
-    # =========================
-    kernel = np.ones((5, 5), np.uint8)
-
-    th = cv2.morphologyEx(
-        th,
+    empty_mask = cv2.morphologyEx(
+        empty_mask,
         cv2.MORPH_CLOSE,
         kernel,
         iterations=2
     )
 
-    th = cv2.morphologyEx(
-        th,
+    empty_mask = cv2.morphologyEx(
+        empty_mask,
         cv2.MORPH_OPEN,
         kernel,
         iterations=1
     )
 
     # =========================
-    # REMOVE SMALL NOISE
+    # EMPTY %
     # =========================
-    contours, _ = cv2.findContours(
-        th,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
+    empty_ratio = (
+        np.count_nonzero(empty_mask)
+        / empty_mask.size
     )
 
-    mask = np.zeros_like(th)
-
-    for c in contours:
-
-        area = cv2.contourArea(c)
-
-        if area > 500:
-            cv2.drawContours(
-                mask,
-                [c],
-                -1,
-                255,
-                -1
-            )
-
     # =========================
-    # OCCUPANCY
+    # OCCUPANCY %
     # =========================
-    occupied_pixels = np.count_nonzero(mask)
-
-    total_pixels = mask.size
-
-    occupancy = occupied_pixels / total_pixels
+    occupancy = (
+        1.0 - empty_ratio
+    )
 
     # =========================
     # SCALE
     # =========================
-    volume = int(occupancy * 140)
+    volume = int(
+        occupancy * 130
+    )
 
-    volume = max(0, min(100, volume))
+    volume = max(
+        0,
+        min(100, volume)
+    )
 
-    volume = int(round(volume / 5) * 5)
+    volume = int(
+        round(volume / 5) * 5
+    )
 
     print(
-        f"VIEW={view_type} "
+        f"EMPTY={empty_ratio:.3f} "
         f"OCC={occupancy:.3f} "
         f"VOL={volume}%"
     )
+
+    # =========================
+    # DEBUG
+    # =========================
+    try:
+        cv2.imwrite(
+            "debug_empty.jpg",
+            empty_mask
+        )
+    except:
+        pass
 
     return volume
 
