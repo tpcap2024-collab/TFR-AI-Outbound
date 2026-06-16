@@ -52,23 +52,18 @@ def gen_volume(img):
 
     h, w = img.shape[:2]
 
-    # =========================
-    # REMOVE WATERMARK
-    # =========================
+    # ตัด watermark
     img = img[:int(h * 0.92), :]
 
     h, w = img.shape[:2]
 
     # =========================
-    # ROI (กลางภาพ)
+    # ROI
     # =========================
     roi = img[
         int(h * 0.08):int(h * 0.90),
         int(w * 0.05):int(w * 0.95)
     ]
-
-    if roi.size == 0:
-        return 0
 
     # =========================
     # HSV
@@ -79,48 +74,44 @@ def gen_volume(img):
     )
 
     # =========================
-    # EMPTY SPACE MASK
-    # ผนัง/เพดาน สีอ่อน
+    # ผนังตู้ (สีอ่อน)
     # =========================
-    lower = np.array([0, 0, 90])
-    upper = np.array([180, 70, 255])
+    lower_wall = np.array([0, 0, 120])
+    upper_wall = np.array([180, 60, 255])
 
-    empty_mask = cv2.inRange(
+    wall_mask = cv2.inRange(
         hsv,
-        lower,
-        upper
+        lower_wall,
+        upper_wall
     )
 
     # =========================
-    # CLEAN MASK
+    # CLEAN
     # =========================
     kernel = np.ones((7, 7), np.uint8)
 
-    empty_mask = cv2.morphologyEx(
-        empty_mask,
+    wall_mask = cv2.morphologyEx(
+        wall_mask,
         cv2.MORPH_CLOSE,
         kernel,
         iterations=2
     )
 
-    empty_mask = cv2.morphologyEx(
-        empty_mask,
+    wall_mask = cv2.morphologyEx(
+        wall_mask,
         cv2.MORPH_OPEN,
         kernel,
         iterations=1
     )
 
     # =========================
-    # EMPTY %
+    # EMPTY AREA
     # =========================
     empty_ratio = (
-        np.count_nonzero(empty_mask)
-        / empty_mask.size
+        np.count_nonzero(wall_mask)
+        / wall_mask.size
     )
 
-    # =========================
-    # OCCUPANCY %
-    # =========================
     occupancy = (
         1.0 - empty_ratio
     )
@@ -147,16 +138,11 @@ def gen_volume(img):
         f"VOL={volume}%"
     )
 
-    # =========================
     # DEBUG
-    # =========================
-    try:
-        cv2.imwrite(
-            "debug_empty.jpg",
-            empty_mask
-        )
-    except:
-        pass
+    cv2.imwrite(
+        "debug_wall.jpg",
+        wall_mask
+    )
 
     return volume
 
