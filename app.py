@@ -60,55 +60,37 @@ def gen_volume(img):
     # =========================
     img = cv2.resize(img, (640, 480))
 
-    # =========================
-    # SIDE VIEW
-    # 4:3 -> 16:9
-    # =========================
-    if view_type == "side":
-
-        h, w = img.shape[:2]
-
-        target_h = int(w * 9 / 16)
-
-        top = (h - target_h) // 2
-
-        img = img[top:top + target_h, :]
-
     h, w = img.shape[:2]
 
-    print(
-        f"VIEW={view_type} "
-        f"SIZE={w}x{h}"
-    )
+    # =========================
+    # REMOVE WATERMARK
+    # =========================
+    img = img[:int(h * 0.92), :]
+
+    h, w = img.shape[:2]
 
     # =========================
     # ROI
     # =========================
-    if view_type == "rear":
-
-        roi = img[
-            int(h * 0.18):int(h * 0.82),
-            int(w * 0.15):int(w * 0.85)
-        ]
-
-    else:
-
-        roi = img[
-            int(h * 0.25):int(h * 0.75),
-            int(w * 0.15):int(w * 0.85)
-        ]
+    roi = img[
+        int(h * 0.10):int(h * 0.90),
+        int(w * 0.05):int(w * 0.95)
+    ]
 
     if roi.size == 0:
         return 0
 
     # =========================
-    # GRAYSCALE
+    # GRAY
     # =========================
     gray = cv2.cvtColor(
         roi,
         cv2.COLOR_BGR2GRAY
     )
 
+    # =========================
+    # BLUR
+    # =========================
     gray = cv2.GaussianBlur(
         gray,
         (5, 5),
@@ -116,70 +98,81 @@ def gen_volume(img):
     )
 
     # =========================
-    # EDGE DENSITY
+    # THRESHOLD
     # =========================
-    edges = cv2.Canny(
+    th = cv2.adaptiveThreshold(
         gray,
-        50,
-        150
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        31,
+        8
     )
 
-    kernel = np.ones((3, 3), np.uint8)
+    # =========================
+    # MORPHOLOGY
+    # =========================
+    kernel = np.ones((5, 5), np.uint8)
 
-    edges = cv2.morphologyEx(
-        edges,
+    th = cv2.morphologyEx(
+        th,
         cv2.MORPH_CLOSE,
-        kernel
+        kernel,
+        iterations=2
     )
 
-    edge_density = (
-        np.count_nonzero(edges)
-        / edges.size
-    )
-
-    # =========================
-    # TEXTURE DENSITY
-    # =========================
-    lap = cv2.Laplacian(
-        gray,
-        cv2.CV_64F
-    )
-
-    texture_density = (
-        np.mean(np.abs(lap))
-        / 255.0
+    th = cv2.morphologyEx(
+        th,
+        cv2.MORPH_OPEN,
+        kernel,
+        iterations=1
     )
 
     # =========================
-    # SCORE
+    # REMOVE SMALL NOISE
     # =========================
-    score = (
-        edge_density * 0.75 +
-        texture_density * 0.25
+    contours, _ = cv2.findContours(
+        th,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
     )
 
+    mask = np.zeros_like(th)
+
+    for c in contours:
+
+        area = cv2.contourArea(c)
+
+        if area > 500:
+            cv2.drawContours(
+                mask,
+                [c],
+                -1,
+                255,
+                -1
+            )
+
     # =========================
-    # CALCULATE VOLUME
+    # OCCUPANCY
     # =========================
-    if view_type == "rear":
+    occupied_pixels = np.count_nonzero(mask)
 
-        # แนวตั้ง (สูตรเดิม)
-        volume = int(score * 800)
+    total_pixels = mask.size
 
-    else:
+    occupancy = occupied_pixels / total_pixels
 
-        # แนวนอน (ลด Scale)
-        volume = int(score * 350)
-
-    volume = int(round(volume / 5) * 5)
+    # =========================
+    # SCALE
+    # =========================
+    volume = int(occupancy * 140)
 
     volume = max(0, min(100, volume))
 
+    volume = int(round(volume / 5) * 5)
+
     print(
         f"VIEW={view_type} "
-        f"EDGE={edge_density:.4f} "
-        f"TEXTURE={texture_density:.4f} "
-        f"SCORE={score:.4f} "
+        f"OCC={occupancy:.3f} "
         f"VOL={volume}%"
     )
 
