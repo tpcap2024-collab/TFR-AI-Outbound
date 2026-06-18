@@ -195,7 +195,7 @@ def gen_volume(img, debug=False, return_empty=False):
         1. Create container_mask = full inner container ROI
         2. Create conservative cargo_mask
         3. empty_mask = container_mask - cargo_mask
-        4. Calculate from full container_mask, not wall_mask
+        4. Calculate from full container_mask
     """
 
     if img is None:
@@ -229,7 +229,6 @@ def gen_volume(img, debug=False, return_empty=False):
 
     # =====================================================
     # ROI: พื้นที่ภายในตู้โดยประมาณ
-    # ปรับ margin ได้ตามมุมกล้องจริง
     # =====================================================
     roi = img[
         int(h * 0.08):int(h * 0.90),
@@ -243,8 +242,7 @@ def gen_volume(img, debug=False, return_empty=False):
 
     # =====================================================
     # CONTAINER MASK
-    # ใช้พื้นที่ ROI ทั้งหมดเป็นพื้นที่ภายในตู้
-    # ไม่ใช้ wall_mask เป็นฐานหลักแล้ว
+    # ใช้ ROI ทั้งหมดเป็นพื้นที่ภายในตู้
     # =====================================================
     container_mask = np.ones(
         (rh, rw),
@@ -290,7 +288,6 @@ def gen_volume(img, debug=False, return_empty=False):
         cv2.COLOR_BGR2GRAY
     )
 
-    h_channel = hsv[:, :, 0]
     s_channel = hsv[:, :, 1]
     v_channel = hsv[:, :, 2]
 
@@ -300,10 +297,6 @@ def gen_volume(img, debug=False, return_empty=False):
     # =====================================================
     # CONSERVATIVE CARGO MASK
     # =====================================================
-    # หลักการ:
-    # - นับเฉพาะสีที่น่าจะเป็น cargo จริง
-    # - ไม่เอา Canny edge ทั้งหมดไปรวม เพราะจะทำให้เขียวเต็มภาพ
-    # - dark object ต้องมี saturation พอสมควร เพื่อลดการนับเงาเป็น cargo
 
     # GREEN PALLET / GREEN OBJECT
     green_mask = cv2.inRange(
@@ -319,17 +312,17 @@ def gen_volume(img, debug=False, return_empty=False):
         np.array([35, 255, 230], dtype=np.uint8)
     )
 
-    # DARK CARGO:
-    # เดิมใช้ gray < 70 ซึ่งกินเงาเยอะเกินไป
-    # ใหม่ใช้ HSV: ต้องมืด + saturation มากพอ
+    # DARK CARGO
+    # ต้องมืดและมี saturation พอสมควร เพื่อลดการจับเงาเป็นสินค้า
     dark_mask = cv2.inRange(
         hsv,
         np.array([0, 35, 0], dtype=np.uint8),
         np.array([180, 255, 70], dtype=np.uint8)
     )
 
-    # OBJECT TEXTURE แบบ conservative
-    # ใช้ adaptive threshold เฉพาะ texture ที่เด่นจริง
+    # =====================================================
+    # TEXTURE MASK แบบ conservative
+    # =====================================================
     blur_gray = cv2.GaussianBlur(
         gray,
         (5, 5),
@@ -345,7 +338,6 @@ def gen_volume(img, debug=False, return_empty=False):
         7
     )
 
-    # จำกัด texture ให้เกิดในบริเวณที่มี saturation หรือมืดจริงเท่านั้น
     saturation_mask = cv2.inRange(
         s_channel,
         45,
@@ -368,7 +360,9 @@ def gen_volume(img, debug=False, return_empty=False):
         texture_candidate
     )
 
-    # รวม cargo แบบ conservative
+    # =====================================================
+    # COMBINE CARGO MASK
+    # =====================================================
     cargo_mask = cv2.bitwise_or(
         green_mask,
         brown_mask
@@ -384,7 +378,6 @@ def gen_volume(img, debug=False, return_empty=False):
         texture_mask
     )
 
-    # จำกัด cargo ให้อยู่ใน container
     cargo_mask = cv2.bitwise_and(
         cargo_mask,
         container_mask
@@ -403,7 +396,6 @@ def gen_volume(img, debug=False, return_empty=False):
         (9, 9)
     )
 
-    # ปิดรูเล็ก ๆ ใน cargo
     cargo_mask = cv2.morphologyEx(
         cargo_mask,
         cv2.MORPH_CLOSE,
@@ -411,7 +403,6 @@ def gen_volume(img, debug=False, return_empty=False):
         iterations=1
     )
 
-    # ลบ noise
     cargo_mask = cv2.morphologyEx(
         cargo_mask,
         cv2.MORPH_OPEN,
@@ -419,16 +410,14 @@ def gen_volume(img, debug=False, return_empty=False):
         iterations=1
     )
 
-    # remove small blobs
     cargo_mask = clean_mask(
         cargo_mask,
         min_area_ratio=0.003
     )
 
     # =====================================================
-    # OPTIONAL: LIMIT OVER-DETECTION
+    # LIMIT OVER-DETECTION
     # =====================================================
-    # ถ้า cargo_mask กินพื้นที่เกิน 98% ให้ลด aggressive โดยใช้เฉพาะ color masks
     raw_cargo_ratio = np.sum(cargo_mask > 0) / float(container_mask.size)
 
     if raw_cargo_ratio > 0.98:
@@ -474,7 +463,6 @@ def gen_volume(img, debug=False, return_empty=False):
     # =====================================================
     # PERSPECTIVE WEIGHT
     # =====================================================
-    # ด้านล่างของภาพใกล้กล้อง จึงให้น้ำหนักมากกว่า
     y = np.linspace(
         0,
         1,
@@ -525,10 +513,9 @@ def gen_volume(img, debug=False, return_empty=False):
     # =====================================================
     # CALIBRATION
     # =====================================================
-    # filled_volume = % มีของ
     filled_volume = (filled_ratio ** 0.95) * 100
 
-    # ลด bias เล็กน้อยเพื่อไม่ให้ overestimate
+    # ลด bias เล็กน้อย ไม่ให้ overestimate
     filled_volume = filled_volume * 0.95
 
     filled_volume = float(
@@ -616,7 +603,6 @@ def gen_volume(img, debug=False, return_empty=False):
             overlay
         )
 
-        # debug masks เพิ่มเติมสำหรับจูน threshold
         save_debug_image(
             "debug_green.jpg",
             green_mask
@@ -868,3 +854,63 @@ def predict():
 
         debug = bool(
             data.get(
+                "debug",
+                True
+            )
+        )
+
+        return_empty = bool(
+            data.get(
+                "return_empty",
+                False
+            )
+        )
+
+        if not image_url or not row_id:
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "missing id or link"
+                }
+            ), 400
+
+        row_id = str(row_id).strip()
+        image_url = str(image_url).strip()
+
+        if is_duplicate(row_id):
+            return jsonify(
+                {
+                    "status": "skipped",
+                    "message": "duplicate request",
+                    "id": row_id
+                }
+            ), 200
+
+        img = download_image(
+            image_url
+        )
+
+        if img is None:
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "image download or decode failed",
+                    "id": row_id
+                }
+            ), 400
+
+        volume = gen_volume(
+            img,
+            debug=debug,
+            return_empty=return_empty
+        )
+
+        volume_text = f"{volume}%"
+
+        print("VOLUME:", volume_text)
+
+        appsheet_ok = update_appsheet(
+            row_id,
+            volume_text
+        )
+
