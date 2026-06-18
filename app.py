@@ -217,7 +217,7 @@ def gen_volume(img, debug=True, return_empty=False):
     s_mean = float(s_channel.mean())
 
     # =========================
-    # CARGO MASK
+    # CARGO COLOR MASKS
     # =========================
 
     # GREEN PALLET / GREEN OBJECT
@@ -241,6 +241,25 @@ def gen_volume(img, debug=True, return_empty=False):
         (125, 255, 255)
     )
 
+    # RED CRATE / RED CARGO
+    # สีแดงใน HSV ต้องแยก 2 ช่วง เพราะ Hue อยู่ทั้งต้นและท้ายวงสี
+    red_mask_1 = cv2.inRange(
+        hsv,
+        (0, 60, 50),
+        (12, 255, 255)
+    )
+
+    red_mask_2 = cv2.inRange(
+        hsv,
+        (165, 60, 50),
+        (180, 255, 255)
+    )
+
+    red_mask = cv2.bitwise_or(
+        red_mask_1,
+        red_mask_2
+    )
+
     # DARK CARGO
     # ปรับเข้มขึ้นเพื่อลดการจับเงา / ผ้า / พื้นมืด
     dark_mask = cv2.inRange(
@@ -261,8 +280,7 @@ def gen_volume(img, debug=True, return_empty=False):
         7
     )
 
-    # เดิมใช้ OR แล้วกินผนัง/ผ้า/เพดานมากเกินไป
-    # เปลี่ยนเป็น AND เพื่อให้ต้องเป็นทั้งสีจัดและมืดพอ จึงนับเป็น texture cargo
+    # ใช้ AND แทน OR เพื่อลดการจับผนัง / ผ้า / เพดาน
     strong_saturation_mask = cv2.inRange(
         s_channel,
         70,
@@ -312,20 +330,54 @@ def gen_volume(img, debug=True, return_empty=False):
     )
 
     # =========================
-    # COMBINE CARGO
+    # TOP FALSE POSITIVE SUPPRESSION
+    # ไม่ตัด color cargo ด้านบนทั้งหมด เพราะบางภาพมีกล่องจริงอยู่ด้านบน
+    # ตัดเฉพาะ texture/dark ที่มักติดเพดานหรือผ้า
     # =========================
-    cargo_mask = cv2.bitwise_or(
+    top_suppress_mask = np.full(
+        (rh, rw),
+        255,
+        dtype=np.uint8
+    )
+
+    top_cut_ratio = 0.12 if view_type == "rear" else 0.16
+    top_cut = int(rh * top_cut_ratio)
+
+    top_suppress_mask[:top_cut, :] = 0
+
+    texture_mask = cv2.bitwise_and(
+        texture_mask,
+        top_suppress_mask
+    )
+
+    dark_mask = cv2.bitwise_and(
+        dark_mask,
+        top_suppress_mask
+    )
+
+    # =========================
+    # COMBINE COLOR MASKS
+    # =========================
+    color_cargo_mask = cv2.bitwise_or(
         green_mask,
         brown_mask
     )
 
-    cargo_mask = cv2.bitwise_or(
-        cargo_mask,
+    color_cargo_mask = cv2.bitwise_or(
+        color_cargo_mask,
         blue_mask
     )
 
+    color_cargo_mask = cv2.bitwise_or(
+        color_cargo_mask,
+        red_mask
+    )
+
+    # =========================
+    # COMBINE CARGO
+    # =========================
     cargo_mask = cv2.bitwise_or(
-        cargo_mask,
+        color_cargo_mask,
         dark_mask
     )
 
@@ -337,26 +389,6 @@ def gen_volume(img, debug=True, return_empty=False):
     cargo_mask = cv2.bitwise_and(
         cargo_mask,
         container_mask
-    )
-
-    # =========================
-    # REMOVE TOP AREA FALSE POSITIVE
-    # ตัดเพดาน / ผ้า / พื้นที่บนที่มักถูก detect เกิน
-    # =========================
-    vertical_mask = np.full(
-        (rh, rw),
-        255,
-        dtype=np.uint8
-    )
-
-    top_cut_ratio = 0.20 if view_type == "rear" else 0.25
-    top_cut = int(rh * top_cut_ratio)
-
-    vertical_mask[:top_cut, :] = 0
-
-    cargo_mask = cv2.bitwise_and(
-        cargo_mask,
-        vertical_mask
     )
 
     # =========================
@@ -386,15 +418,15 @@ def gen_volume(img, debug=True, return_empty=False):
         iterations=1
     )
 
-    # เพิ่ม min_area_ratio เพื่อลด noise จุดเล็ก ๆ
+    # ลด noise จุดเล็ก
     cargo_mask = clean_mask(
         cargo_mask,
-        min_area_ratio=0.006
+        min_area_ratio=0.005
     )
 
     # =========================
-    # REMOVE NON-BOX / SMALL NOISE SHAPES
-    # กรอง shape ที่เล็กหรือแบน/ยาวผิดปกติ
+    # CONTOUR FILTER
+    # กรอง noise เล็ก ๆ และ shape ที่ไม่น่าเป็น cargo
     # =========================
     contours, _ = cv2.findContours(
         cargo_mask,
@@ -404,7 +436,7 @@ def gen_volume(img, debug=True, return_empty=False):
 
     filtered_mask = np.zeros_like(cargo_mask)
 
-    min_contour_area = rh * rw * 0.005
+    min_contour_area = rh * rw * 0.0035
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -414,13 +446,13 @@ def gen_volume(img, debug=True, return_empty=False):
 
         x_box, y_box, w_box, h_box = cv2.boundingRect(cnt)
 
-        if h_box <= 0:
+        if h_box <= 0 or w_box <= 0:
             continue
 
         aspect_ratio = w_box / float(h_box)
 
-        # กล่อง / pallet / cargo ส่วนใหญ่ไม่ควรแบนหรือยาวผิดปกติมาก
-        if 0.35 <= aspect_ratio <= 4.0:
+        # ช่วงกว้างขึ้นเพื่อไม่ตัดกล่องที่เรียงยาวหลายใบ
+        if 0.20 <= aspect_ratio <= 6.50:
             cv2.drawContours(
                 filtered_mask,
                 [cnt],
@@ -439,15 +471,7 @@ def gen_volume(img, debug=True, return_empty=False):
     if raw_cargo_ratio > 0.95:
         print("WARNING: cargo over-detected, fallback to color only")
 
-        cargo_mask = cv2.bitwise_or(
-            green_mask,
-            brown_mask
-        )
-
-        cargo_mask = cv2.bitwise_or(
-            cargo_mask,
-            blue_mask
-        )
+        cargo_mask = color_cargo_mask.copy()
 
         cargo_mask = cv2.bitwise_or(
             cargo_mask,
@@ -456,7 +480,7 @@ def gen_volume(img, debug=True, return_empty=False):
 
         cargo_mask = cv2.bitwise_and(
             cargo_mask,
-            vertical_mask
+            container_mask
         )
 
         cargo_mask = cv2.morphologyEx(
@@ -475,7 +499,7 @@ def gen_volume(img, debug=True, return_empty=False):
 
         cargo_mask = clean_mask(
             cargo_mask,
-            min_area_ratio=0.006
+            min_area_ratio=0.005
         )
 
         raw_cargo_ratio = cv2.countNonZero(cargo_mask) / float(container_mask.size)
@@ -542,6 +566,7 @@ def gen_volume(img, debug=True, return_empty=False):
     # =========================
     filled_volume = (filled_ratio ** 0.95) * 100
     filled_volume = filled_volume * 0.95
+
     filled_volume = float(
         np.clip(
             filled_volume,
@@ -585,11 +610,12 @@ def gen_volume(img, debug=True, return_empty=False):
             0
         )
 
-        # RED = empty
+        # BLUE = empty
+        # เปลี่ยนจากสีแดงเป็นสีน้ำเงิน เพื่อไม่ให้กลืนกับลังแดงจริง
         color_layer[empty_mask > 0] = (
+            255,
             0,
-            0,
-            255
+            0
         )
 
         overlay = cv2.addWeighted(
@@ -606,6 +632,7 @@ def gen_volume(img, debug=True, return_empty=False):
             cv2.CHAIN_APPROX_SIMPLE
         )
 
+        # YELLOW contour = cargo
         cv2.drawContours(
             overlay,
             cargo_contours,
@@ -620,11 +647,12 @@ def gen_volume(img, debug=True, return_empty=False):
             cv2.CHAIN_APPROX_SIMPLE
         )
 
+        # BLUE contour = empty
         cv2.drawContours(
             overlay,
             empty_contours,
             -1,
-            (0, 0, 255),
+            (255, 0, 0),
             1
         )
 
@@ -650,7 +678,7 @@ def gen_volume(img, debug=True, return_empty=False):
             overlay_contour,
             empty_contours,
             -1,
-            (0, 0, 255),
+            (255, 0, 0),
             1
         )
 
@@ -670,6 +698,7 @@ def gen_volume(img, debug=True, return_empty=False):
         save_debug("debug_texture.jpg", texture_mask)
 
     return output_volume
+
 
 # =========================
 # UPDATE APPSHEET
