@@ -1,148 +1,89 @@
-import os
-import cv2
-import time
-import numpy as np
-import requests
-import traceback
-import threading
-
 from flask import Flask, request, jsonify, send_file
-
+import requests
+import cv2
+import numpy as np
+import traceback
+import time
+import threading
+import os
 
 app = Flask(__name__)
 
 
-# =====================================================
+# =========================
 # APPSHEET CONFIG
-# แนะนำให้ตั้งค่าเป็น Environment Variables
-# =====================================================
-APP_ID = os.getenv("APPSHEET_APP_ID", "5ebec09a-62dd-4fa9-8f14-830fb104518f")
-ACCESS_KEY = os.getenv("APPSHEET_ACCESS_KEY", "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp")
-TABLE_NAME = os.getenv("APPSHEET_TABLE_NAME", "Data TFR")
+# =========================
+APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
+
+# แนะนำ: อย่า hardcode key จริงใน production
+# ใส่ key ของคุณตรงนี้ หรือใช้ os.getenv ภายหลัง
+ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
+
+TABLE_NAME = "Data TFR"
 
 
-# =====================================================
-# CONFIG
-# =====================================================
-REQUEST_TIMEOUT = 20
-IMAGE_MAX_BYTES = 10 * 1024 * 1024
-DUPLICATE_TTL_SEC = 10 * 60
-
-DEBUG_DIR = os.getenv("DEBUG_DIR", "/tmp")
+# =========================
+# DEBUG CONFIG
+# =========================
+DEBUG_DIR = "/tmp"
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 
-# =====================================================
-# DUPLICATE LOCK WITH TTL
-# =====================================================
-processed_ids = {}
+# =========================
+# LOCK
+# =========================
+processed_ids = set()
 lock = threading.Lock()
 
 
-def cleanup_processed_ids():
-    now = time.time()
-
-    expired = [
-        row_id
-        for row_id, ts in processed_ids.items()
-        if now - ts > DUPLICATE_TTL_SEC
-    ]
-
-    for row_id in expired:
-        processed_ids.pop(row_id, None)
-
-
-def is_duplicate(row_id):
-    with lock:
-        cleanup_processed_ids()
-
-        if row_id in processed_ids:
-            return True
-
-        processed_ids[row_id] = time.time()
-        return False
-
-
-# =====================================================
+# =========================
 # DOWNLOAD IMAGE
-# =====================================================
+# =========================
 def download_image(url):
-    """
-    Download image safely and decode to OpenCV BGR image.
-    """
-
     try:
-        if not isinstance(url, str):
-            print("Invalid URL type")
-            return None
-
-        url = url.strip()
-
-        if not url.startswith(("http://", "https://")):
-            print("Invalid URL scheme")
-            return None
-
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
-
-        response = requests.get(
+        r = requests.get(
             url,
-            headers=headers,
-            timeout=REQUEST_TIMEOUT,
-            allow_redirects=True
+            timeout=15,
+            allow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
         )
 
-        if response.status_code != 200:
-            print(f"Image download failed: HTTP {response.status_code}")
+        if r.status_code != 200:
+            print("IMAGE HTTP ERROR:", r.status_code)
             return None
-
-        if len(response.content) == 0:
-            print("Empty response content")
-            return None
-
-        if len(response.content) > IMAGE_MAX_BYTES:
-            print("Image too large")
-            return None
-
-        img_array = np.frombuffer(response.content, np.uint8)
 
         img = cv2.imdecode(
-            img_array,
+            np.frombuffer(r.content, np.uint8),
             cv2.IMREAD_COLOR
         )
 
-        if img is None:
-            print("OpenCV decode failed")
-            return None
-
-        if img.size == 0:
-            print("Decoded image is empty")
-            return None
-
         return img
 
-    except requests.exceptions.Timeout:
-        print("Image download timeout")
-        return None
-
-    except requests.exceptions.RequestException as e:
-        print(f"Image request error: {e}")
-        return None
-
     except Exception as e:
-        print(f"Unexpected image download error: {e}")
+        print("DOWNLOAD ERROR:", e)
         return None
 
 
-# =====================================================
-# UTILS
-# =====================================================
-def clean_mask(mask, min_area_ratio=0.002):
-    """
-    Remove small connected components.
-    """
+# =========================
+# DEBUG SAVE
+# =========================
+def save_debug(filename, img):
+    try:
+        path = os.path.join(DEBUG_DIR, filename)
+        ok = cv2.imwrite(path, img)
+        print(f"SAVE DEBUG {filename}: {ok}")
+        return ok
+    except Exception as e:
+        print("SAVE DEBUG ERROR:", filename, e)
+        return False
 
+
+# =========================
+# CLEAN MASK
+# =========================
+def clean_mask(mask, min_area_ratio=0.002):
     if mask is None or mask.size == 0:
         return mask
 
@@ -164,94 +105,91 @@ def clean_mask(mask, min_area_ratio=0.002):
     return result
 
 
-def save_debug_image(filename, image):
+# =========================
+# 🔥 BALANCED VOLUME MODEL V2
+# =========================
+def gen_volume(img, debug=True, return_empty=False):
     """
-    Save debug image to DEBUG_DIR.
-    """
+    return_empty=False  -> คืนค่า % เต็ม / cargo volume
+    return_empty=True   -> คืนค่า % พื้นที่ว่าง / empty volume
 
-    path = os.path.join(DEBUG_DIR, filename)
-
-    ok = cv2.imwrite(path, image)
-
-    print(f"Save debug {filename}: {ok}")
-
-    return ok
-
-
-# =====================================================
-# VOLUME MODEL
-# =====================================================
-def gen_volume(img, debug=False, return_empty=False):
-    """
-    Estimate volume from container image.
-
-    Default:
-        return filled volume %
-
-    If return_empty=True:
-        return empty space %
-
-    Main logic:
-        1. Create container_mask = full inner container ROI
-        2. Create conservative cargo_mask
-        3. empty_mask = container_mask - cargo_mask
-        4. Calculate from full container_mask
+    Logic:
+    1. Detect view type
+    2. Crop ROI
+    3. container_mask = พื้นที่ภายในตู้ทั้งหมด
+    4. cargo_mask = conservative mask
+    5. empty_mask = container_mask - cargo_mask
+    6. คำนวณจาก container ทั้งหมด
     """
 
-    if img is None:
-        raise ValueError("Input image is None")
+    if img is None or img.size == 0:
+        return 0
 
-    if img.size == 0:
-        raise ValueError("Input image is empty")
+    # =========================
+    # DETECT VIEW TYPE
+    # =========================
+    orig_h, orig_w = img.shape[:2]
 
-    # =====================================================
+    if orig_h > orig_w:
+        view_type = "rear"
+    else:
+        view_type = "side"
+
+    # =========================
     # RESIZE
-    # =====================================================
-    img = cv2.resize(
-        img,
-        (640, 480)
+    # =========================
+    img = cv2.resize(img, (640, 480))
+
+    # =========================
+    # SIDE VIEW
+    # 4:3 -> 16:9
+    # =========================
+    if view_type == "side":
+        h, w = img.shape[:2]
+
+        target_h = int(w * 9 / 16)
+        top = max(0, (h - target_h) // 2)
+
+        img = img[top:top + target_h, :]
+
+    h, w = img.shape[:2]
+
+    print(
+        f"VIEW={view_type} "
+        f"SIZE={w}x{h}"
     )
 
-    h, w = img.shape[:2]
-
-    # =====================================================
-    # REMOVE WATERMARK AREA
-    # =====================================================
-    img = img[
-        :int(h * 0.92),
-        :
-    ]
-
-    h, w = img.shape[:2]
-
-    if h <= 0 or w <= 0:
-        raise ValueError("Invalid image size after watermark crop")
-
-    # =====================================================
-    # ROI: พื้นที่ภายในตู้โดยประมาณ
-    # =====================================================
-    roi = img[
-        int(h * 0.08):int(h * 0.90),
-        int(w * 0.05):int(w * 0.95)
-    ]
+    # =========================
+    # ROI
+    # =========================
+    if view_type == "rear":
+        roi = img[
+            int(h * 0.18):int(h * 0.82),
+            int(w * 0.15):int(w * 0.85)
+        ]
+    else:
+        roi = img[
+            int(h * 0.25):int(h * 0.75),
+            int(w * 0.15):int(w * 0.85)
+        ]
 
     if roi.size == 0:
-        raise ValueError("ROI is empty")
+        return 0
 
     rh, rw = roi.shape[:2]
 
-    # =====================================================
+    # =========================
     # CONTAINER MASK
-    # ใช้ ROI ทั้งหมดเป็นพื้นที่ภายในตู้
-    # =====================================================
+    # ใช้ ROI ทั้งหมดเป็นพื้นที่ในตู้
+    # =========================
     container_mask = np.ones(
         (rh, rw),
         dtype=np.uint8
     ) * 255
 
-    # =====================================================
+    # =========================
     # LIGHT NORMALIZATION
-    # =====================================================
+    # =========================
     lab = cv2.cvtColor(
         roi,
         cv2.COLOR_BGR2LAB
@@ -266,18 +204,16 @@ def gen_volume(img, debug=False, return_empty=False):
 
     l = clahe.apply(l)
 
-    lab = cv2.merge(
-        [l, a, b]
-    )
+    lab = cv2.merge([l, a, b])
 
     roi_norm = cv2.cvtColor(
         lab,
         cv2.COLOR_LAB2BGR
     )
 
-    # =====================================================
+    # =========================
     # COLOR SPACE
-    # =====================================================
+    # =========================
     hsv = cv2.cvtColor(
         roi_norm,
         cv2.COLOR_BGR2HSV
@@ -288,15 +224,21 @@ def gen_volume(img, debug=False, return_empty=False):
         cv2.COLOR_BGR2GRAY
     )
 
+    gray_blur = cv2.GaussianBlur(
+        gray,
+        (5, 5),
+        0
+    )
+
     s_channel = hsv[:, :, 1]
     v_channel = hsv[:, :, 2]
 
     v_mean = float(np.mean(v_channel))
     s_mean = float(np.mean(s_channel))
 
-    # =====================================================
+    # =========================
     # CONSERVATIVE CARGO MASK
-    # =====================================================
+    # =========================
 
     # GREEN PALLET / GREEN OBJECT
     green_mask = cv2.inRange(
@@ -305,7 +247,7 @@ def gen_volume(img, debug=False, return_empty=False):
         np.array([95, 255, 255], dtype=np.uint8)
     )
 
-    # BROWN CARTON / WOODEN PALLET
+    # BROWN CARTON / WOOD / PALLET
     brown_mask = cv2.inRange(
         hsv,
         np.array([5, 45, 45], dtype=np.uint8),
@@ -313,24 +255,18 @@ def gen_volume(img, debug=False, return_empty=False):
     )
 
     # DARK CARGO
-    # ต้องมืดและมี saturation พอสมควร เพื่อลดการจับเงาเป็นสินค้า
+    # ลดการจับเงาโดยบังคับ saturation ขั้นต่ำ
     dark_mask = cv2.inRange(
         hsv,
         np.array([0, 35, 0], dtype=np.uint8),
         np.array([180, 255, 70], dtype=np.uint8)
     )
 
-    # =====================================================
+    # =========================
     # TEXTURE MASK แบบ conservative
-    # =====================================================
-    blur_gray = cv2.GaussianBlur(
-        gray,
-        (5, 5),
-        0
-    )
-
+    # =========================
     adaptive_texture = cv2.adaptiveThreshold(
-        blur_gray,
+        gray_blur,
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY_INV,
@@ -360,9 +296,10 @@ def gen_volume(img, debug=False, return_empty=False):
         texture_candidate
     )
 
-    # =====================================================
-    # COMBINE CARGO MASK
-    # =====================================================
+    # =========================
+    # COMBINE CARGO
+    # ไม่เอา Canny edge ทั้งหมดเข้ามา เพราะจะทำให้เต็ม 90-95% ง่าย
+    # =========================
     cargo_mask = cv2.bitwise_or(
         green_mask,
         brown_mask
@@ -383,9 +320,9 @@ def gen_volume(img, debug=False, return_empty=False):
         container_mask
     )
 
-    # =====================================================
+    # =========================
     # MORPHOLOGY
-    # =====================================================
+    # =========================
     kernel_small = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (5, 5)
@@ -415,13 +352,13 @@ def gen_volume(img, debug=False, return_empty=False):
         min_area_ratio=0.003
     )
 
-    # =====================================================
-    # LIMIT OVER-DETECTION
-    # =====================================================
-    raw_cargo_ratio = np.sum(cargo_mask > 0) / float(container_mask.size)
+    # =========================
+    # FALLBACK ถ้า cargo กินภาพเยอะผิดปกติ
+    # =========================
+    raw_cargo_ratio = np.count_nonzero(cargo_mask) / float(container_mask.size)
 
-    if raw_cargo_ratio > 0.98:
-        print("Warning: cargo over-detected. Fallback to color-only mask.")
+    if raw_cargo_ratio > 0.95:
+        print("WARNING: cargo over-detected, fallback to color only")
 
         cargo_mask = cv2.bitwise_or(
             green_mask,
@@ -452,24 +389,24 @@ def gen_volume(img, debug=False, return_empty=False):
             min_area_ratio=0.003
         )
 
-    # =====================================================
+    # =========================
     # EMPTY MASK = CONTAINER - CARGO
-    # =====================================================
+    # =========================
     empty_mask = cv2.bitwise_and(
         container_mask,
         cv2.bitwise_not(cargo_mask)
     )
 
-    # =====================================================
+    # =========================
     # PERSPECTIVE WEIGHT
-    # =====================================================
-    y = np.linspace(
-        0,
-        1,
-        rh
-    )
+    # =========================
+    y = np.linspace(0, 1, rh)
 
-    weights = 0.65 + (y ** 1.6) * 1.35
+    if view_type == "rear":
+        weights = 0.70 + (y ** 1.5) * 1.30
+    else:
+        weights = 0.80 + (y ** 1.3) * 1.10
+
     weights = weights.reshape(
         rh,
         1
@@ -488,43 +425,21 @@ def gen_volume(img, debug=False, return_empty=False):
     )
 
     if container_score <= 1e-6:
-        print("Warning: container_score is zero")
         return 0
 
     filled_ratio = cargo_score / container_score
     empty_ratio = empty_score / container_score
 
-    filled_ratio = float(
-        np.clip(
-            filled_ratio,
-            0,
-            1
-        )
-    )
+    filled_ratio = float(np.clip(filled_ratio, 0, 1))
+    empty_ratio = float(np.clip(empty_ratio, 0, 1))
 
-    empty_ratio = float(
-        np.clip(
-            empty_ratio,
-            0,
-            1
-        )
-    )
-
-    # =====================================================
+    # =========================
     # CALIBRATION
-    # =====================================================
+    # =========================
+    # ใช้สูตรอ่อนกว่าเดิม เพื่อลดการพุ่งไป 90-95%
     filled_volume = (filled_ratio ** 0.95) * 100
-
-    # ลด bias เล็กน้อย ไม่ให้ overestimate
     filled_volume = filled_volume * 0.95
-
-    filled_volume = float(
-        np.clip(
-            filled_volume,
-            0,
-            100
-        )
-    )
+    filled_volume = float(np.clip(filled_volume, 0, 100))
 
     empty_volume = 100 - filled_volume
 
@@ -533,37 +448,31 @@ def gen_volume(img, debug=False, return_empty=False):
     else:
         output_volume = filled_volume
 
-    output_volume = int(
-        round(output_volume / 5) * 5
+    output_volume = int(round(output_volume / 5) * 5)
+    output_volume = max(0, min(100, output_volume))
+
+    print(
+        f"VIEW={view_type} "
+        f"VMEAN={v_mean:.1f} "
+        f"SMEAN={s_mean:.1f} "
+        f"RAW_CARGO={raw_cargo_ratio:.3f} "
+        f"FILLED_RATIO={filled_ratio:.3f} "
+        f"EMPTY_RATIO={empty_ratio:.3f} "
+        f"RETURN={output_volume}% "
+        f"MODE={'EMPTY' if return_empty else 'FILLED'}"
     )
 
-    output_volume = int(
-        np.clip(
-            output_volume,
-            0,
-            100
-        )
-    )
-
-    # =====================================================
+    # =========================
     # DEBUG OUTPUT
-    # =====================================================
+    # =========================
     if debug:
         debug_img = roi_norm.copy()
 
         # GREEN = cargo
-        debug_img[cargo_mask > 0] = (
-            0,
-            255,
-            0
-        )
+        debug_img[cargo_mask > 0] = (0, 255, 0)
 
         # RED = empty
-        debug_img[empty_mask > 0] = (
-            0,
-            0,
-            255
-        )
+        debug_img[empty_mask > 0] = (0, 0, 255)
 
         overlay = cv2.addWeighted(
             roi_norm,
@@ -573,93 +482,27 @@ def gen_volume(img, debug=False, return_empty=False):
             0
         )
 
-        save_debug_image(
-            "debug_original.jpg",
-            roi
-        )
+        save_debug("debug_original.jpg", roi)
+        save_debug("debug_normalized.jpg", roi_norm)
+        save_debug("debug_container.jpg", container_mask)
+        save_debug("debug_cargo.jpg", cargo_mask)
+        save_debug("debug_empty.jpg", empty_mask)
+        save_debug("debug_overlay.jpg", overlay)
 
-        save_debug_image(
-            "debug_normalized.jpg",
-            roi_norm
-        )
-
-        save_debug_image(
-            "debug_container.jpg",
-            container_mask
-        )
-
-        save_debug_image(
-            "debug_cargo.jpg",
-            cargo_mask
-        )
-
-        save_debug_image(
-            "debug_empty.jpg",
-            empty_mask
-        )
-
-        save_debug_image(
-            "debug_overlay.jpg",
-            overlay
-        )
-
-        save_debug_image(
-            "debug_green.jpg",
-            green_mask
-        )
-
-        save_debug_image(
-            "debug_brown.jpg",
-            brown_mask
-        )
-
-        save_debug_image(
-            "debug_dark.jpg",
-            dark_mask
-        )
-
-        save_debug_image(
-            "debug_texture.jpg",
-            texture_mask
-        )
-
-    print(
-        f"VMEAN={v_mean:.1f} "
-        f"SMEAN={s_mean:.1f} "
-        f"FILLED_RATIO={filled_ratio:.3f} "
-        f"EMPTY_RATIO={empty_ratio:.3f} "
-        f"FILLED_VOL={filled_volume:.1f}% "
-        f"RETURN={output_volume}% "
-        f"MODE={'EMPTY' if return_empty else 'FILLED'}"
-    )
+        save_debug("debug_green.jpg", green_mask)
+        save_debug("debug_brown.jpg", brown_mask)
+        save_debug("debug_dark.jpg", dark_mask)
+        save_debug("debug_texture.jpg", texture_mask)
 
     return output_volume
 
 
-# =====================================================
+# =========================
 # UPDATE APPSHEET
-# =====================================================
+# =========================
 def update_appsheet(row_id, volume_text):
-    """
-    Update AppSheet row.
-    """
 
-    if not APP_ID:
-        print("Missing APPSHEET_APP_ID")
-        return False
-
-    if not ACCESS_KEY:
-        print("Missing APPSHEET_ACCESS_KEY")
-        return False
-
-    if not TABLE_NAME:
-        print("Missing APPSHEET_TABLE_NAME")
-        return False
-
-    url = (
-        f"https://api.appsheet.com/api/v2/apps/"
-        f"{APP_ID}/tables/{TABLE_NAME}/Action"
-    )
+    url = f"https://api.appsheet.com/api/v2/apps/{APP_ID}/tables/{TABLE_NAME}/Action"
 
     headers = {
         "ApplicationAccessKey": ACCESS_KEY,
@@ -678,65 +521,38 @@ def update_appsheet(row_id, volume_text):
     }
 
     try:
-        response = requests.post(
+        r = requests.post(
             url,
             json=payload,
             headers=headers,
-            timeout=REQUEST_TIMEOUT
+            timeout=20
         )
 
-        if response.status_code not in (200, 201):
-            print(
-                "AppSheet update failed:",
-                response.status_code,
-                response.text[:500]
-            )
-            return False
-
-        print("AppSheet update success")
-        return True
-
-    except requests.exceptions.Timeout:
-        print("AppSheet update timeout")
-        return False
-
-    except requests.exceptions.RequestException as e:
-        print(f"AppSheet request error: {e}")
-        return False
+        print("APPSHEET STATUS:", r.status_code)
+        print("APPSHEET RESPONSE:", r.text[:300])
 
     except Exception as e:
-        print(f"Unexpected AppSheet error: {e}")
-        return False
+        print("APPSHEET ERROR:", e)
 
 
-# =====================================================
+# =========================
 # HEALTH CHECK
-# =====================================================
+# =========================
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify(
-        {
-            "status": "ok",
-            "service": "container-volume-ai"
-        }
-    ), 200
+    return jsonify({
+        "status": "ok",
+        "service": "container-volume-ai"
+    })
 
 
-# =====================================================
-# DEBUG BROWSER ENDPOINT
-# =====================================================
+# =========================
+# DEBUG VIEW
+# =========================
 @app.route("/debug/<filename>", methods=["GET"])
-def get_debug_file(filename):
-    """
-    Open debug image in browser.
+def debug_file(filename):
 
-    Example:
-        /debug/debug_overlay.jpg
-        /debug/debug_cargo.jpg
-        /debug/debug_empty.jpg
-    """
-
-    allowed_files = {
+    allowed = {
         "debug_original.jpg",
         "debug_normalized.jpg",
         "debug_container.jpg",
@@ -749,39 +565,19 @@ def get_debug_file(filename):
         "debug_texture.jpg"
     }
 
-    if filename not in allowed_files:
-        return jsonify(
-            {
-                "status": "error",
-                "message": "file not allowed"
-            }
-        ), 403
+    if filename not in allowed:
+        return jsonify({"error": "file not allowed"}), 403
 
-    path = os.path.join(
-        DEBUG_DIR,
-        filename
-    )
+    path = os.path.join(DEBUG_DIR, filename)
 
     if not os.path.exists(path):
-        return jsonify(
-            {
-                "status": "error",
-                "message": "debug file not found",
-                "filename": filename
-            }
-        ), 404
+        return jsonify({"error": "debug file not found"}), 404
 
-    return send_file(
-        path,
-        mimetype="image/jpeg"
-    )
+    return send_file(path, mimetype="image/jpeg")
 
 
 @app.route("/debug-list", methods=["GET"])
 def debug_list():
-    """
-    List debug files and browser URLs.
-    """
 
     files = [
         "debug_original.jpg",
@@ -798,107 +594,61 @@ def debug_list():
 
     base_url = request.host_url.rstrip("/")
 
-    return jsonify(
-        {
-            "status": "ok",
-            "debug_files": [
-                {
-                    "file": f,
-                    "url": f"{base_url}/debug/{f}",
-                    "exists": os.path.exists(
-                        os.path.join(DEBUG_DIR, f)
-                    )
-                }
-                for f in files
-            ]
-        }
-    ), 200
+    return jsonify({
+        "status": "ok",
+        "files": [
+            {
+                "file": f,
+                "url": f"{base_url}/debug/{f}",
+                "exists": os.path.exists(os.path.join(DEBUG_DIR, f))
+            }
+            for f in files
+        ]
+    })
 
 
-# =====================================================
+# =========================
 # API ENDPOINT
-# =====================================================
+# =========================
 @app.route("/predict", methods=["POST"])
 def predict():
-    """
-    Expected JSON:
-    {
-        "id": "row_id",
-        "link": "image_url",
-
-        optional:
-        "debug": true,
-        "return_empty": false
-    }
-
-    return_empty:
-        false = return filled volume %
-        true  = return empty space %
-    """
 
     try:
-        data = request.get_json(
-            silent=True
-        )
+        data = request.get_json(silent=True)
 
-        if not isinstance(data, dict):
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "invalid or missing json"
-                }
-            ), 400
+        if not data:
+            return jsonify({"error": "no json"}), 400
 
         image_url = data.get("link")
         row_id = data.get("id")
 
-        debug = bool(
-            data.get(
-                "debug",
-                True
-            )
-        )
-
-        return_empty = bool(
-            data.get(
-                "return_empty",
-                False
-            )
-        )
+        # optional
+        debug = bool(data.get("debug", True))
+        return_empty = bool(data.get("return_empty", False))
 
         if not image_url or not row_id:
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "missing id or link"
-                }
-            ), 400
+            return jsonify({"error": "missing data"}), 400
 
-        row_id = str(row_id).strip()
-        image_url = str(image_url).strip()
+        # =========================
+        # DUPLICATE LOCK
+        # =========================
+        with lock:
+            if row_id in processed_ids:
+                return jsonify({"status": "skipped"}), 200
 
-        if is_duplicate(row_id):
-            return jsonify(
-                {
-                    "status": "skipped",
-                    "message": "duplicate request",
-                    "id": row_id
-                }
-            ), 200
+            processed_ids.add(row_id)
 
-        img = download_image(
-            image_url
-        )
+        # =========================
+        # IMAGE LOAD
+        # =========================
+        img = download_image(image_url)
 
         if img is None:
-            return jsonify(
-                {
-                    "status": "error",
-                    "message": "image download or decode failed",
-                    "id": row_id
-                }
-            ), 400
+            return jsonify({"error": "image fail"}), 400
 
+        # =========================
+        # AI PROCESS
+        # =========================
         volume = gen_volume(
             img,
             debug=debug,
@@ -909,8 +659,39 @@ def predict():
 
         print("VOLUME:", volume_text)
 
-        appsheet_ok = update_appsheet(
-            row_id,
-            volume_text
-        )
+        # =========================
+        # UPDATE SHEET
+        # =========================
+        update_appsheet(row_id, volume_text)
 
+        base_url = request.host_url.rstrip("/")
+
+        return jsonify({
+            "status": "success",
+            "id": row_id,
+            "volume": volume_text,
+            "mode": "empty" if return_empty else "filled",
+            "debug": debug,
+            "debug_urls": {
+                "overlay": f"{base_url}/debug/debug_overlay.jpg",
+                "cargo": f"{base_url}/debug/debug_cargo.jpg",
+                "empty": f"{base_url}/debug/debug_empty.jpg",
+                "container": f"{base_url}/debug/debug_container.jpg",
+                "list": f"{base_url}/debug-list"
+            }
+        })
+
+    except Exception:
+        print(traceback.format_exc())
+        return jsonify({"error": "server error"}), 500
+
+
+# =========================
+# RUN SERVER
+# =========================
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=10000,
+        threaded=True
+    )
