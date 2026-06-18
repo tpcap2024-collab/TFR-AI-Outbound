@@ -245,7 +245,10 @@ def gen_volume(img, debug=True, return_empty=False):
         np.array([35, 255, 230], dtype=np.uint8)
     )
 
-    # BLUE / CYAN CRATE
+    # =========================
+    # ADDED: BLUE / CYAN CRATE
+    # สำหรับลังสีน้ำเงิน / ฟ้า / เขียวอมฟ้า
+    # =========================
     blue_mask = cv2.inRange(
         hsv,
         np.array([85, 35, 35], dtype=np.uint8),
@@ -253,6 +256,7 @@ def gen_volume(img, debug=True, return_empty=False):
     )
 
     # DARK CARGO
+    # บังคับ saturation ขั้นต่ำ เพื่อลดการจับเงาเป็นสินค้า
     dark_mask = cv2.inRange(
         hsv,
         np.array([0, 35, 0], dtype=np.uint8),
@@ -260,7 +264,7 @@ def gen_volume(img, debug=True, return_empty=False):
     )
 
     # =========================
-    # TEXTURE MASK
+    # TEXTURE MASK แบบ conservative
     # =========================
     adaptive_texture = cv2.adaptiveThreshold(
         gray_blur,
@@ -271,6 +275,7 @@ def gen_volume(img, debug=True, return_empty=False):
         7
     )
 
+    # ลด texture ที่ติดผนัง/พื้นมากเกินไป
     strong_saturation_mask = cv2.inRange(
         s_channel,
         70,
@@ -301,6 +306,7 @@ def gen_volume(img, debug=True, return_empty=False):
         brown_mask
     )
 
+    # ADDED: รวม blue_mask เข้า cargo
     cargo_mask = cv2.bitwise_or(
         cargo_mask,
         blue_mask
@@ -366,6 +372,7 @@ def gen_volume(img, debug=True, return_empty=False):
             brown_mask
         )
 
+        # ADDED: fallback ก็รวม blue_mask ด้วย
         cargo_mask = cv2.bitwise_or(
             cargo_mask,
             blue_mask
@@ -486,6 +493,315 @@ def gen_volume(img, debug=True, return_empty=False):
 
     # =========================
     # DEBUG OUTPUT
+    # ADDED: overlay แบบโปร่งใส + contour
     # =========================
     if debug:
 
+        color_layer = roi_norm.copy()
+
+        # GREEN = cargo
+        color_layer[cargo_mask > 0] = (
+            0,
+            255,
+            0
+        )
+
+        # RED = empty
+        color_layer[empty_mask > 0] = (
+            0,
+            0,
+            255
+        )
+
+        # Overlay โปร่งใส เพื่อให้เห็นภาพต้นฉบับชัดขึ้น
+        overlay = cv2.addWeighted(
+            roi_norm,
+            0.85,
+            color_layer,
+            0.15,
+            0
+        )
+
+        # วาด contour ของ cargo
+        cargo_contours, _ = cv2.findContours(
+            cargo_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        cv2.drawContours(
+            overlay,
+            cargo_contours,
+            -1,
+            (0, 255, 255),
+            2
+        )
+
+        # วาด contour ของ empty
+        empty_contours, _ = cv2.findContours(
+            empty_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        cv2.drawContours(
+            overlay,
+            empty_contours,
+            -1,
+            (0, 0, 255),
+            1
+        )
+
+        # Overlay แบบเบามาก
+        overlay_light = cv2.addWeighted(
+            roi_norm,
+            0.92,
+            color_layer,
+            0.08,
+            0
+        )
+
+        # Overlay เฉพาะเส้นขอบ
+        overlay_contour = roi_norm.copy()
+
+        cv2.drawContours(
+            overlay_contour,
+            cargo_contours,
+            -1,
+            (0, 255, 255),
+            2
+        )
+
+        cv2.drawContours(
+            overlay_contour,
+            empty_contours,
+            -1,
+            (0, 0, 255),
+            1
+        )
+
+        save_debug("debug_original.jpg", roi)
+        save_debug("debug_normalized.jpg", roi_norm)
+        save_debug("debug_container.jpg", container_mask)
+        save_debug("debug_cargo.jpg", cargo_mask)
+        save_debug("debug_empty.jpg", empty_mask)
+        save_debug("debug_overlay.jpg", overlay)
+        save_debug("debug_overlay_light.jpg", overlay_light)
+        save_debug("debug_overlay_contour.jpg", overlay_contour)
+
+        save_debug("debug_green.jpg", green_mask)
+        save_debug("debug_brown.jpg", brown_mask)
+        save_debug("debug_blue.jpg", blue_mask)
+        save_debug("debug_dark.jpg", dark_mask)
+        save_debug("debug_texture.jpg", texture_mask)
+
+    return output_volume
+
+
+# =========================
+# UPDATE APPSHEET
+# =========================
+def update_appsheet(row_id, volume_text):
+
+    url = f"https://api.appsheet.com/api/v2/apps/{APP_ID}/tables/{TABLE_NAME}/Action"
+
+    headers = {
+        "ApplicationAccessKey": ACCESS_KEY,
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "Action": "Edit",
+        "Rows": [
+            {
+                "id": row_id,
+                "TFR AI": volume_text,
+                "status": "Done"
+            }
+        ]
+    }
+
+    try:
+        r = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=20
+        )
+
+        print("APPSHEET STATUS:", r.status_code)
+        print("APPSHEET RESPONSE:", r.text[:300])
+
+    except Exception as e:
+        print("APPSHEET ERROR:", e)
+
+
+# =========================
+# HEALTH CHECK
+# =========================
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "service": "container-volume-ai"
+    })
+
+
+# =========================
+# DEBUG VIEW
+# =========================
+@app.route("/debug/<filename>", methods=["GET"])
+def debug_file(filename):
+
+    allowed = {
+        "debug_original.jpg",
+        "debug_normalized.jpg",
+        "debug_container.jpg",
+        "debug_cargo.jpg",
+        "debug_empty.jpg",
+        "debug_overlay.jpg",
+        "debug_overlay_light.jpg",
+        "debug_overlay_contour.jpg",
+        "debug_green.jpg",
+        "debug_brown.jpg",
+        "debug_blue.jpg",
+        "debug_dark.jpg",
+        "debug_texture.jpg"
+    }
+
+    if filename not in allowed:
+        return jsonify({"error": "file not allowed"}), 403
+
+    path = os.path.join(DEBUG_DIR, filename)
+
+    if not os.path.exists(path):
+        return jsonify({"error": "debug file not found"}), 404
+
+    return send_file(path, mimetype="image/jpeg")
+
+
+@app.route("/debug-list", methods=["GET"])
+def debug_list():
+
+    files = [
+        "debug_original.jpg",
+        "debug_normalized.jpg",
+        "debug_container.jpg",
+        "debug_cargo.jpg",
+        "debug_empty.jpg",
+        "debug_overlay.jpg",
+        "debug_overlay_light.jpg",
+        "debug_overlay_contour.jpg",
+        "debug_green.jpg",
+        "debug_brown.jpg",
+        "debug_blue.jpg",
+        "debug_dark.jpg",
+        "debug_texture.jpg"
+    ]
+
+    base_url = request.host_url.rstrip("/")
+
+    return jsonify({
+        "status": "ok",
+        "files": [
+            {
+                "file": f,
+                "url": f"{base_url}/debug/{f}",
+                "exists": os.path.exists(os.path.join(DEBUG_DIR, f))
+            }
+            for f in files
+        ]
+    })
+
+
+# =========================
+# API ENDPOINT
+# =========================
+@app.route("/predict", methods=["POST"])
+def predict():
+
+    try:
+        data = request.get_json(silent=True)
+
+        if not data:
+            return jsonify({"error": "no json"}), 400
+
+        image_url = data.get("link")
+        row_id = data.get("id")
+
+        # optional
+        debug = bool(data.get("debug", True))
+        return_empty = bool(data.get("return_empty", False))
+
+        if not image_url or not row_id:
+            return jsonify({"error": "missing data"}), 400
+
+        # =========================
+        # DUPLICATE LOCK
+        # =========================
+        with lock:
+            if row_id in processed_ids:
+                return jsonify({"status": "skipped"}), 200
+
+            processed_ids.add(row_id)
+
+        # =========================
+        # IMAGE LOAD
+        # =========================
+        img = download_image(image_url)
+
+        if img is None:
+            return jsonify({"error": "image fail"}), 400
+
+        # =========================
+        # AI PROCESS
+        # =========================
+        volume = gen_volume(
+            img,
+            debug=debug,
+            return_empty=return_empty
+        )
+
+        volume_text = f"{volume}%"
+
+        print("VOLUME:", volume_text)
+
+        # =========================
+        # UPDATE SHEET
+        # =========================
+        update_appsheet(row_id, volume_text)
+
+        base_url = request.host_url.rstrip("/")
+
+        return jsonify({
+            "status": "success",
+            "id": row_id,
+            "volume": volume_text,
+            "mode": "empty" if return_empty else "filled",
+            "debug": debug,
+            "debug_urls": {
+                "overlay": f"{base_url}/debug/debug_overlay.jpg",
+                "overlay_light": f"{base_url}/debug/debug_overlay_light.jpg",
+                "overlay_contour": f"{base_url}/debug/debug_overlay_contour.jpg",
+                "cargo": f"{base_url}/debug/debug_cargo.jpg",
+                "empty": f"{base_url}/debug/debug_empty.jpg",
+                "container": f"{base_url}/debug/debug_container.jpg",
+                "blue": f"{base_url}/debug/debug_blue.jpg",
+                "list": f"{base_url}/debug-list"
+            }
+        })
+
+    except Exception:
+        print(traceback.format_exc())
+        return jsonify({"error": "server error"}), 500
+
+
+# =========================
+# RUN SERVER
+# =========================
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=10000,
+        threaded=True
+    )
