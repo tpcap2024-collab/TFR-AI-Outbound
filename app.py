@@ -14,11 +14,7 @@ app = Flask(__name__)
 # APPSHEET CONFIG
 # =========================
 APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
-
-# แนะนำ: อย่า hardcode key จริงใน production
-# ใส่ key ของคุณตรงนี้ หรือใช้ os.getenv ภายหลัง
 ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
-
 TABLE_NAME = "Data TFR"
 
 
@@ -75,6 +71,7 @@ def save_debug(filename, img):
         ok = cv2.imwrite(path, img)
         print(f"SAVE DEBUG {filename}: {ok}")
         return ok
+
     except Exception as e:
         print("SAVE DEBUG ERROR:", filename, e)
         return False
@@ -106,21 +103,9 @@ def clean_mask(mask, min_area_ratio=0.002):
 
 
 # =========================
-# 🔥 BALANCED VOLUME MODEL V2
+# BALANCED VOLUME MODEL
 # =========================
 def gen_volume(img, debug=True, return_empty=False):
-    """
-    return_empty=False  -> คืนค่า % เต็ม / cargo volume
-    return_empty=True   -> คืนค่า % พื้นที่ว่าง / empty volume
-
-    Logic:
-    1. Detect view type
-    2. Crop ROI
-    3. container_mask = พื้นที่ภายในตู้ทั้งหมด
-    4. cargo_mask = conservative mask
-    5. empty_mask = container_mask - cargo_mask
-    6. คำนวณจาก container ทั้งหมด
-    """
 
     if img is None or img.size == 0:
         return 0
@@ -145,6 +130,7 @@ def gen_volume(img, debug=True, return_empty=False):
     # 4:3 -> 16:9
     # =========================
     if view_type == "side":
+
         h, w = img.shape[:2]
 
         target_h = int(w * 9 / 16)
@@ -163,11 +149,14 @@ def gen_volume(img, debug=True, return_empty=False):
     # ROI
     # =========================
     if view_type == "rear":
+
         roi = img[
             int(h * 0.18):int(h * 0.82),
             int(w * 0.15):int(w * 0.85)
         ]
+
     else:
+
         roi = img[
             int(h * 0.25):int(h * 0.75),
             int(w * 0.15):int(w * 0.85)
@@ -180,7 +169,7 @@ def gen_volume(img, debug=True, return_empty=False):
 
     # =========================
     # CONTAINER MASK
-    # ใช้ ROI ทั้งหมดเป็นพื้นที่ในตู้
+    # ใช้ ROI ทั้งหมดเป็นพื้นที่ภายในตู้
     # =========================
     container_mask = np.ones(
         (rh, rw),
@@ -204,7 +193,9 @@ def gen_volume(img, debug=True, return_empty=False):
 
     l = clahe.apply(l)
 
-    lab = cv2.merge([l, a, b])
+    lab = cv2.merge(
+        [l, a, b]
+    )
 
     roi_norm = cv2.cvtColor(
         lab,
@@ -237,7 +228,7 @@ def gen_volume(img, debug=True, return_empty=False):
     s_mean = float(np.mean(s_channel))
 
     # =========================
-    # CONSERVATIVE CARGO MASK
+    # CARGO MASK
     # =========================
 
     # GREEN PALLET / GREEN OBJECT
@@ -254,8 +245,18 @@ def gen_volume(img, debug=True, return_empty=False):
         np.array([35, 255, 230], dtype=np.uint8)
     )
 
+    # =========================
+    # ADDED: BLUE / CYAN CRATE
+    # สำหรับลังสีน้ำเงิน / ฟ้า / เขียวอมฟ้า
+    # =========================
+    blue_mask = cv2.inRange(
+        hsv,
+        np.array([85, 35, 35], dtype=np.uint8),
+        np.array([125, 255, 255], dtype=np.uint8)
+    )
+
     # DARK CARGO
-    # ลดการจับเงาโดยบังคับ saturation ขั้นต่ำ
+    # บังคับ saturation ขั้นต่ำ เพื่อลดการจับเงาเป็นสินค้า
     dark_mask = cv2.inRange(
         hsv,
         np.array([0, 35, 0], dtype=np.uint8),
@@ -274,21 +275,22 @@ def gen_volume(img, debug=True, return_empty=False):
         7
     )
 
-    saturation_mask = cv2.inRange(
+    # ลด texture ที่ติดผนัง/พื้นมากเกินไป
+    strong_saturation_mask = cv2.inRange(
         s_channel,
-        45,
+        70,
         255
     )
 
-    low_value_mask = cv2.inRange(
+    strong_low_value_mask = cv2.inRange(
         v_channel,
         0,
-        90
+        75
     )
 
     texture_candidate = cv2.bitwise_or(
-        saturation_mask,
-        low_value_mask
+        strong_saturation_mask,
+        strong_low_value_mask
     )
 
     texture_mask = cv2.bitwise_and(
@@ -298,11 +300,16 @@ def gen_volume(img, debug=True, return_empty=False):
 
     # =========================
     # COMBINE CARGO
-    # ไม่เอา Canny edge ทั้งหมดเข้ามา เพราะจะทำให้เต็ม 90-95% ง่าย
     # =========================
     cargo_mask = cv2.bitwise_or(
         green_mask,
         brown_mask
+    )
+
+    # ADDED: รวม blue_mask เข้า cargo
+    cargo_mask = cv2.bitwise_or(
+        cargo_mask,
+        blue_mask
     )
 
     cargo_mask = cv2.bitwise_or(
@@ -365,6 +372,12 @@ def gen_volume(img, debug=True, return_empty=False):
             brown_mask
         )
 
+        # ADDED: fallback ก็รวม blue_mask ด้วย
+        cargo_mask = cv2.bitwise_or(
+            cargo_mask,
+            blue_mask
+        )
+
         cargo_mask = cv2.bitwise_or(
             cargo_mask,
             dark_mask
@@ -400,7 +413,11 @@ def gen_volume(img, debug=True, return_empty=False):
     # =========================
     # PERSPECTIVE WEIGHT
     # =========================
-    y = np.linspace(0, 1, rh)
+    y = np.linspace(
+        0,
+        1,
+        rh
+    )
 
     if view_type == "rear":
         weights = 0.70 + (y ** 1.5) * 1.30
@@ -430,13 +447,25 @@ def gen_volume(img, debug=True, return_empty=False):
     filled_ratio = cargo_score / container_score
     empty_ratio = empty_score / container_score
 
-    filled_ratio = float(np.clip(filled_ratio, 0, 1))
-    empty_ratio = float(np.clip(empty_ratio, 0, 1))
+    filled_ratio = float(
+        np.clip(
+            filled_ratio,
+            0,
+            1
+        )
+    )
+
+    empty_ratio = float(
+        np.clip(
+            empty_ratio,
+            0,
+            1
+        )
+    )
 
     # =========================
     # CALIBRATION
     # =========================
-    # ใช้สูตรอ่อนกว่าเดิม เพื่อลดการพุ่งไป 90-95%
     filled_volume = (filled_ratio ** 0.95) * 100
     filled_volume = filled_volume * 0.95
     filled_volume = float(np.clip(filled_volume, 0, 100))
@@ -464,22 +493,91 @@ def gen_volume(img, debug=True, return_empty=False):
 
     # =========================
     # DEBUG OUTPUT
+    # ADDED: overlay แบบโปร่งใส + contour
     # =========================
     if debug:
-        debug_img = roi_norm.copy()
+
+        color_layer = roi_norm.copy()
 
         # GREEN = cargo
-        debug_img[cargo_mask > 0] = (0, 255, 0)
+        color_layer[cargo_mask > 0] = (
+            0,
+            255,
+            0
+        )
 
         # RED = empty
-        debug_img[empty_mask > 0] = (0, 0, 255)
+        color_layer[empty_mask > 0] = (
+            0,
+            0,
+            255
+        )
 
+        # Overlay โปร่งใส เพื่อให้เห็นภาพต้นฉบับชัดขึ้น
         overlay = cv2.addWeighted(
             roi_norm,
-            0.65,
-            debug_img,
-            0.35,
+            0.85,
+            color_layer,
+            0.15,
             0
+        )
+
+        # วาด contour ของ cargo
+        cargo_contours, _ = cv2.findContours(
+            cargo_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        cv2.drawContours(
+            overlay,
+            cargo_contours,
+            -1,
+            (0, 255, 255),
+            2
+        )
+
+        # วาด contour ของ empty
+        empty_contours, _ = cv2.findContours(
+            empty_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        cv2.drawContours(
+            overlay,
+            empty_contours,
+            -1,
+            (0, 0, 255),
+            1
+        )
+
+        # Overlay แบบเบามาก
+        overlay_light = cv2.addWeighted(
+            roi_norm,
+            0.92,
+            color_layer,
+            0.08,
+            0
+        )
+
+        # Overlay เฉพาะเส้นขอบ
+        overlay_contour = roi_norm.copy()
+
+        cv2.drawContours(
+            overlay_contour,
+            cargo_contours,
+            -1,
+            (0, 255, 255),
+            2
+        )
+
+        cv2.drawContours(
+            overlay_contour,
+            empty_contours,
+            -1,
+            (0, 0, 255),
+            1
         )
 
         save_debug("debug_original.jpg", roi)
@@ -488,9 +586,12 @@ def gen_volume(img, debug=True, return_empty=False):
         save_debug("debug_cargo.jpg", cargo_mask)
         save_debug("debug_empty.jpg", empty_mask)
         save_debug("debug_overlay.jpg", overlay)
+        save_debug("debug_overlay_light.jpg", overlay_light)
+        save_debug("debug_overlay_contour.jpg", overlay_contour)
 
         save_debug("debug_green.jpg", green_mask)
         save_debug("debug_brown.jpg", brown_mask)
+        save_debug("debug_blue.jpg", blue_mask)
         save_debug("debug_dark.jpg", dark_mask)
         save_debug("debug_texture.jpg", texture_mask)
 
@@ -559,8 +660,11 @@ def debug_file(filename):
         "debug_cargo.jpg",
         "debug_empty.jpg",
         "debug_overlay.jpg",
+        "debug_overlay_light.jpg",
+        "debug_overlay_contour.jpg",
         "debug_green.jpg",
         "debug_brown.jpg",
+        "debug_blue.jpg",
         "debug_dark.jpg",
         "debug_texture.jpg"
     }
@@ -586,8 +690,11 @@ def debug_list():
         "debug_cargo.jpg",
         "debug_empty.jpg",
         "debug_overlay.jpg",
+        "debug_overlay_light.jpg",
+        "debug_overlay_contour.jpg",
         "debug_green.jpg",
         "debug_brown.jpg",
+        "debug_blue.jpg",
         "debug_dark.jpg",
         "debug_texture.jpg"
     ]
@@ -674,9 +781,12 @@ def predict():
             "debug": debug,
             "debug_urls": {
                 "overlay": f"{base_url}/debug/debug_overlay.jpg",
+                "overlay_light": f"{base_url}/debug/debug_overlay_light.jpg",
+                "overlay_contour": f"{base_url}/debug/debug_overlay_contour.jpg",
                 "cargo": f"{base_url}/debug/debug_cargo.jpg",
                 "empty": f"{base_url}/debug/debug_empty.jpg",
                 "container": f"{base_url}/debug/debug_container.jpg",
+                "blue": f"{base_url}/debug/debug_blue.jpg",
                 "list": f"{base_url}/debug-list"
             }
         })
