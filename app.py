@@ -103,6 +103,92 @@ def clean_mask(mask, min_area_ratio=0.002):
 
 
 # =========================
+# REMOVE WALL-LIKE COMPONENTS
+# ADDED: ลบผนังตู้ที่ถูกจับเป็นงาน
+# =========================
+def remove_wall_like_components(mask, roi_bgr, hsv):
+    """
+    Remove wall/background-like components from cargo mask safely.
+
+    เงื่อนไขลบ:
+    - component ใหญ่
+    - กว้างมาก
+    - แตะขอบบน
+    - saturation เฉลี่ยต่ำ คล้ายผนัง
+    - ไม่ได้ลงมาถึงขอบล่างมากเกินไป
+
+    ช่วยลดกรณีผนังตู้ถูกนับเป็นงาน
+    """
+
+    if mask is None or mask.size == 0:
+        return mask
+
+    rh, rw = mask.shape[:2]
+
+    s_channel = hsv[:, :, 1]
+    v_channel = hsv[:, :, 2]
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask,
+        connectivity=8
+    )
+
+    result = np.zeros_like(mask)
+
+    for i in range(1, num_labels):
+        x = stats[i, cv2.CC_STAT_LEFT]
+        y = stats[i, cv2.CC_STAT_TOP]
+        ww = stats[i, cv2.CC_STAT_WIDTH]
+        hh = stats[i, cv2.CC_STAT_HEIGHT]
+        area = stats[i, cv2.CC_STAT_AREA]
+
+        area_ratio = area / float(mask.size)
+        width_ratio = ww / float(rw)
+        height_ratio = hh / float(rh)
+
+        component_mask = labels == i
+
+        mean_s = float(np.mean(s_channel[component_mask]))
+        mean_v = float(np.mean(v_channel[component_mask]))
+
+        touches_top = y <= int(rh * 0.08)
+        very_wide = width_ratio >= 0.65
+        very_large = area_ratio >= 0.15
+        tall_enough = height_ratio >= 0.30
+
+        # ถ้า component ลงมาถึงด้านล่างมาก อาจเป็นสินค้าจริงที่เต็มตู้
+        touches_bottom = (y + hh) >= int(rh * 0.88)
+
+        # ผนังตู้ส่วนมาก saturation ต่ำกว่า cargo จริง
+        low_saturation_wall = mean_s < 80
+
+        # ไม่ใช่วัตถุมืดจัด
+        not_dark_object = mean_v > 55
+
+        is_wall_like = (
+            touches_top and
+            very_wide and
+            very_large and
+            tall_enough and
+            low_saturation_wall and
+            not_dark_object and
+            not touches_bottom
+        )
+
+        if is_wall_like:
+            print(
+                "REMOVE WALL-LIKE:",
+                f"x={x}, y={y}, w={ww}, h={hh}, "
+                f"area={area_ratio:.3f}, "
+                f"mean_s={mean_s:.1f}, mean_v={mean_v:.1f}"
+            )
+        else:
+            result[component_mask] = 255
+
+    return result
+
+
+# =========================
 # BALANCED VOLUME MODEL
 # =========================
 def gen_volume(img, debug=True, return_empty=False):
@@ -232,10 +318,12 @@ def gen_volume(img, debug=True, return_empty=False):
     # =========================
 
     # GREEN PALLET / GREEN OBJECT
+    # CHANGED: เพิ่ม saturation ขั้นต่ำจาก 45 เป็น 75
+    # เพื่อลดการจับผนังเขียวอ่อนเป็นงาน
     green_mask = cv2.inRange(
         hsv,
-        np.array([35, 45, 45], dtype=np.uint8),
-        np.array([95, 255, 255], dtype=np.uint8)
+        np.array([38, 75, 45], dtype=np.uint8),
+        np.array([90, 255, 245], dtype=np.uint8)
     )
 
     # BROWN CARTON / WOOD / PALLET
@@ -245,10 +333,8 @@ def gen_volume(img, debug=True, return_empty=False):
         np.array([35, 255, 230], dtype=np.uint8)
     )
 
-    # =========================
-    # ADDED: BLUE / CYAN CRATE
-    # สำหรับลังสีน้ำเงิน / ฟ้า / เขียวอมฟ้า
-    # =========================
+    # BLUE / CYAN CRATE
+    # ADDED: สำหรับลังสีน้ำเงิน / ฟ้า / เขียวอมฟ้า
     blue_mask = cv2.inRange(
         hsv,
         np.array([85, 35, 35], dtype=np.uint8),
@@ -275,17 +361,18 @@ def gen_volume(img, debug=True, return_empty=False):
         7
     )
 
-    # ลด texture ที่ติดผนัง/พื้นมากเกินไป
+    # CHANGED: ลด texture ที่ติดผนัง/พื้นมากเกินไป
+    # เดิม 70/75 -> ใหม่ 90/65
     strong_saturation_mask = cv2.inRange(
         s_channel,
-        70,
+        90,
         255
     )
 
     strong_low_value_mask = cv2.inRange(
         v_channel,
         0,
-        75
+        65
     )
 
     texture_candidate = cv2.bitwise_or(
@@ -306,7 +393,6 @@ def gen_volume(img, debug=True, return_empty=False):
         brown_mask
     )
 
-    # ADDED: รวม blue_mask เข้า cargo
     cargo_mask = cv2.bitwise_or(
         cargo_mask,
         blue_mask
@@ -359,6 +445,13 @@ def gen_volume(img, debug=True, return_empty=False):
         min_area_ratio=0.003
     )
 
+    # ADDED: ลบ component ที่น่าจะเป็นผนังตู้
+    cargo_mask = remove_wall_like_components(
+        cargo_mask,
+        roi_norm,
+        hsv
+    )
+
     # =========================
     # FALLBACK ถ้า cargo กินภาพเยอะผิดปกติ
     # =========================
@@ -372,7 +465,6 @@ def gen_volume(img, debug=True, return_empty=False):
             brown_mask
         )
 
-        # ADDED: fallback ก็รวม blue_mask ด้วย
         cargo_mask = cv2.bitwise_or(
             cargo_mask,
             blue_mask
@@ -400,6 +492,13 @@ def gen_volume(img, debug=True, return_empty=False):
         cargo_mask = clean_mask(
             cargo_mask,
             min_area_ratio=0.003
+        )
+
+        # ADDED: fallback ก็ลบ wall-like ด้วย
+        cargo_mask = remove_wall_like_components(
+            cargo_mask,
+            roi_norm,
+            hsv
         )
 
     # =========================
@@ -493,7 +592,7 @@ def gen_volume(img, debug=True, return_empty=False):
 
     # =========================
     # DEBUG OUTPUT
-    # ADDED: overlay แบบโปร่งใส + contour
+    # overlay แบบโปร่งใส + contour
     # =========================
     if debug:
 
@@ -786,7 +885,11 @@ def predict():
                 "cargo": f"{base_url}/debug/debug_cargo.jpg",
                 "empty": f"{base_url}/debug/debug_empty.jpg",
                 "container": f"{base_url}/debug/debug_container.jpg",
+                "green": f"{base_url}/debug/debug_green.jpg",
+                "brown": f"{base_url}/debug/debug_brown.jpg",
                 "blue": f"{base_url}/debug/debug_blue.jpg",
+                "dark": f"{base_url}/debug/debug_dark.jpg",
+                "texture": f"{base_url}/debug/debug_texture.jpg",
                 "list": f"{base_url}/debug-list"
             }
         })
