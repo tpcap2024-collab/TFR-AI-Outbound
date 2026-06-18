@@ -44,10 +44,8 @@ def download_image(url):
 # 🔥 BALANCED VOLUME MODEL
 # =========================
 
-def gen_volume_v2(img):
-    """
-    Improved container volume estimation
-    """
+def gen_volume(img):
+   
 
     # ==============================
     # RESIZE & CROP
