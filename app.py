@@ -3,6 +3,7 @@ import requests
 import cv2
 import numpy as np
 import traceback
+import time
 import threading
 import os
 
@@ -13,7 +14,7 @@ app = Flask(__name__)
 # APPSHEET CONFIG
 # =========================
 APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
-ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
+ACCESS_KEY = "PUT_YOUR_APPSHEET_ACCESS_KEY_HERE"
 TABLE_NAME = "Data TFR"
 
 
@@ -102,125 +103,6 @@ def clean_mask(mask, min_area_ratio=0.002):
 
 
 # =========================
-# ADDED: BUILD CARGO ZONE
-# จำกัดพื้นที่ให้ texture/dark ทำงานเฉพาะโซนวางของ
-# =========================
-def build_cargo_zone(shape, view_type):
-    """
-    สร้าง zone ที่น่าจะเป็นพื้นที่วางของจริง
-
-    จุดประสงค์:
-    - ลดการจับผนัง / หลังคา / ผนังข้างตู้เป็น cargo
-    - ใช้จำกัดเฉพาะ dark_mask และ texture_mask
-    - ไม่จำกัด blue/brown/green mask เพราะ cargo สีชัดอาจอยู่สูงได้
-    """
-
-    rh, rw = shape[:2]
-
-    zone = np.zeros(
-        (rh, rw),
-        dtype=np.uint8
-    )
-
-    if view_type == "rear":
-        # rear view: ของมักอยู่กลาง-ล่าง
-        y1 = int(rh * 0.36)
-        y2 = int(rh * 0.98)
-        x1 = int(rw * 0.03)
-        x2 = int(rw * 0.97)
-    else:
-        # side view: ของมักอยู่กลาง-ล่าง
-        y1 = int(rh * 0.32)
-        y2 = int(rh * 0.98)
-        x1 = int(rw * 0.03)
-        x2 = int(rw * 0.97)
-
-    zone[y1:y2, x1:x2] = 255
-
-    return zone
-
-
-# =========================
-# REMOVE WALL-LIKE COMPONENTS
-# ลบ component ใหญ่ที่เหมือนผนังตู้
-# =========================
-def remove_wall_like_components(mask, roi_bgr, hsv):
-    """
-    Remove wall/background-like components from cargo mask safely.
-
-    เงื่อนไขลบ:
-    - component ใหญ่
-    - กว้างมาก
-    - แตะขอบบน
-    - saturation เฉลี่ยต่ำ คล้ายผนัง
-    - ไม่ได้ลงมาถึงขอบล่างมากเกินไป
-    """
-
-    if mask is None or mask.size == 0:
-        return mask
-
-    rh, rw = mask.shape[:2]
-
-    s_channel = hsv[:, :, 1]
-    v_channel = hsv[:, :, 2]
-
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-        mask,
-        connectivity=8
-    )
-
-    result = np.zeros_like(mask)
-
-    for i in range(1, num_labels):
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        ww = stats[i, cv2.CC_STAT_WIDTH]
-        hh = stats[i, cv2.CC_STAT_HEIGHT]
-        area = stats[i, cv2.CC_STAT_AREA]
-
-        area_ratio = area / float(mask.size)
-        width_ratio = ww / float(rw)
-        height_ratio = hh / float(rh)
-
-        component_mask = labels == i
-
-        mean_s = float(np.mean(s_channel[component_mask]))
-        mean_v = float(np.mean(v_channel[component_mask]))
-
-        touches_top = y <= int(rh * 0.08)
-        very_wide = width_ratio >= 0.65
-        very_large = area_ratio >= 0.15
-        tall_enough = height_ratio >= 0.30
-
-        touches_bottom = (y + hh) >= int(rh * 0.88)
-
-        low_saturation_wall = mean_s < 80
-        not_dark_object = mean_v > 55
-
-        is_wall_like = (
-            touches_top and
-            very_wide and
-            very_large and
-            tall_enough and
-            low_saturation_wall and
-            not_dark_object and
-            not touches_bottom
-        )
-
-        if is_wall_like:
-            print(
-                "REMOVE WALL-LIKE:",
-                f"x={x}, y={y}, w={ww}, h={hh}, "
-                f"area={area_ratio:.3f}, "
-                f"mean_s={mean_s:.1f}, mean_v={mean_v:.1f}"
-            )
-        else:
-            result[component_mask] = 255
-
-    return result
-
-
-# =========================
 # BALANCED VOLUME MODEL
 # =========================
 def gen_volume(img, debug=True, return_empty=False):
@@ -287,20 +169,12 @@ def gen_volume(img, debug=True, return_empty=False):
 
     # =========================
     # CONTAINER MASK
+    # ใช้ ROI ทั้งหมดเป็นพื้นที่ภายในตู้
     # =========================
     container_mask = np.ones(
         (rh, rw),
         dtype=np.uint8
     ) * 255
-
-    # =========================
-    # ADDED: CARGO ZONE
-    # ใช้จำกัดเฉพาะ dark_mask และ texture_mask
-    # =========================
-    cargo_zone = build_cargo_zone(
-        (rh, rw),
-        view_type
-    )
 
     # =========================
     # LIGHT NORMALIZATION
@@ -309,4 +183,309 @@ def gen_volume(img, debug=True, return_empty=False):
         roi,
         cv2.COLOR_BGR2LAB
     )
+
+    l, a, b = cv2.split(lab)
+
+    clahe = cv2.createCLAHE(
+        clipLimit=2.0,
+        tileGridSize=(8, 8)
+    )
+
+    l = clahe.apply(l)
+
+    lab = cv2.merge(
+        [l, a, b]
+    )
+
+    roi_norm = cv2.cvtColor(
+        lab,
+        cv2.COLOR_LAB2BGR
+    )
+
+    # =========================
+    # COLOR SPACE
+    # =========================
+    hsv = cv2.cvtColor(
+        roi_norm,
+        cv2.COLOR_BGR2HSV
+    )
+
+    gray = cv2.cvtColor(
+        roi_norm,
+        cv2.COLOR_BGR2GRAY
+    )
+
+    gray_blur = cv2.GaussianBlur(
+        gray,
+        (5, 5),
+        0
+    )
+
+    s_channel = hsv[:, :, 1]
+    v_channel = hsv[:, :, 2]
+
+    v_mean = float(np.mean(v_channel))
+    s_mean = float(np.mean(s_channel))
+
+    # =========================
+    # CARGO MASK
+    # =========================
+
+    # GREEN PALLET / GREEN OBJECT
+    green_mask = cv2.inRange(
+        hsv,
+        np.array([35, 45, 45], dtype=np.uint8),
+        np.array([95, 255, 255], dtype=np.uint8)
+    )
+
+    # BROWN CARTON / WOOD / PALLET
+    brown_mask = cv2.inRange(
+        hsv,
+        np.array([5, 45, 45], dtype=np.uint8),
+        np.array([35, 255, 230], dtype=np.uint8)
+    )
+
+    # BLUE / CYAN CRATE
+    blue_mask = cv2.inRange(
+        hsv,
+        np.array([85, 35, 35], dtype=np.uint8),
+        np.array([125, 255, 255], dtype=np.uint8)
+    )
+
+    # DARK CARGO
+    dark_mask = cv2.inRange(
+        hsv,
+        np.array([0, 35, 0], dtype=np.uint8),
+        np.array([180, 255, 70], dtype=np.uint8)
+    )
+
+    # =========================
+    # TEXTURE MASK
+    # =========================
+    adaptive_texture = cv2.adaptiveThreshold(
+        gray_blur,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        31,
+        7
+    )
+
+    strong_saturation_mask = cv2.inRange(
+        s_channel,
+        70,
+        255
+    )
+
+    strong_low_value_mask = cv2.inRange(
+        v_channel,
+        0,
+        75
+    )
+
+    texture_candidate = cv2.bitwise_or(
+        strong_saturation_mask,
+        strong_low_value_mask
+    )
+
+    texture_mask = cv2.bitwise_and(
+        adaptive_texture,
+        texture_candidate
+    )
+
+    # =========================
+    # COMBINE CARGO
+    # =========================
+    cargo_mask = cv2.bitwise_or(
+        green_mask,
+        brown_mask
+    )
+
+    cargo_mask = cv2.bitwise_or(
+        cargo_mask,
+        blue_mask
+    )
+
+    cargo_mask = cv2.bitwise_or(
+        cargo_mask,
+        dark_mask
+    )
+
+    cargo_mask = cv2.bitwise_or(
+        cargo_mask,
+        texture_mask
+    )
+
+    cargo_mask = cv2.bitwise_and(
+        cargo_mask,
+        container_mask
+    )
+
+    # =========================
+    # MORPHOLOGY
+    # =========================
+    kernel_small = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (5, 5)
+    )
+
+    kernel_medium = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (9, 9)
+    )
+
+    cargo_mask = cv2.morphologyEx(
+        cargo_mask,
+        cv2.MORPH_CLOSE,
+        kernel_medium,
+        iterations=1
+    )
+
+    cargo_mask = cv2.morphologyEx(
+        cargo_mask,
+        cv2.MORPH_OPEN,
+        kernel_small,
+        iterations=1
+    )
+
+    cargo_mask = clean_mask(
+        cargo_mask,
+        min_area_ratio=0.003
+    )
+
+    # =========================
+    # FALLBACK ถ้า cargo กินภาพเยอะผิดปกติ
+    # =========================
+    raw_cargo_ratio = np.count_nonzero(cargo_mask) / float(container_mask.size)
+
+    if raw_cargo_ratio > 0.95:
+        print("WARNING: cargo over-detected, fallback to color only")
+
+        cargo_mask = cv2.bitwise_or(
+            green_mask,
+            brown_mask
+        )
+
+        cargo_mask = cv2.bitwise_or(
+            cargo_mask,
+            blue_mask
+        )
+
+        cargo_mask = cv2.bitwise_or(
+            cargo_mask,
+            dark_mask
+        )
+
+        cargo_mask = cv2.morphologyEx(
+            cargo_mask,
+            cv2.MORPH_CLOSE,
+            kernel_medium,
+            iterations=1
+        )
+
+        cargo_mask = cv2.morphologyEx(
+            cargo_mask,
+            cv2.MORPH_OPEN,
+            kernel_small,
+            iterations=1
+        )
+
+        cargo_mask = clean_mask(
+            cargo_mask,
+            min_area_ratio=0.003
+        )
+
+    # =========================
+    # EMPTY MASK = CONTAINER - CARGO
+    # =========================
+    empty_mask = cv2.bitwise_and(
+        container_mask,
+        cv2.bitwise_not(cargo_mask)
+    )
+
+    # =========================
+    # PERSPECTIVE WEIGHT
+    # =========================
+    y = np.linspace(
+        0,
+        1,
+        rh
+    )
+
+    if view_type == "rear":
+        weights = 0.70 + (y ** 1.5) * 1.30
+    else:
+        weights = 0.80 + (y ** 1.3) * 1.10
+
+    weights = weights.reshape(
+        rh,
+        1
+    ).astype(np.float32)
+
+    container_score = np.sum(
+        (container_mask > 0).astype(np.float32) * weights
+    )
+
+    cargo_score = np.sum(
+        (cargo_mask > 0).astype(np.float32) * weights
+    )
+
+    empty_score = np.sum(
+        (empty_mask > 0).astype(np.float32) * weights
+    )
+
+    if container_score <= 1e-6:
+        return 0
+
+    filled_ratio = cargo_score / container_score
+    empty_ratio = empty_score / container_score
+
+    filled_ratio = float(
+        np.clip(
+            filled_ratio,
+            0,
+            1
+        )
+    )
+
+    empty_ratio = float(
+        np.clip(
+            empty_ratio,
+            0,
+            1
+        )
+    )
+
+    # =========================
+    # CALIBRATION
+    # =========================
+    filled_volume = (filled_ratio ** 0.95) * 100
+    filled_volume = filled_volume * 0.95
+    filled_volume = float(np.clip(filled_volume, 0, 100))
+
+    empty_volume = 100 - filled_volume
+
+    if return_empty:
+        output_volume = empty_volume
+    else:
+        output_volume = filled_volume
+
+    output_volume = int(round(output_volume / 5) * 5)
+    output_volume = max(0, min(100, output_volume))
+
+    print(
+        f"VIEW={view_type} "
+        f"VMEAN={v_mean:.1f} "
+        f"SMEAN={s_mean:.1f} "
+        f"RAW_CARGO={raw_cargo_ratio:.3f} "
+        f"FILLED_RATIO={filled_ratio:.3f} "
+        f"EMPTY_RATIO={empty_ratio:.3f} "
+        f"RETURN={output_volume}% "
+        f"MODE={'EMPTY' if return_empty else 'FILLED'}"
+    )
+
+    # =========================
+    # DEBUG OUTPUT
+    # =========================
+    if debug:
 
