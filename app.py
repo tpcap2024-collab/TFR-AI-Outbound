@@ -698,15 +698,17 @@ def _volume(img, debug=True, return_empty=False):
     return output_volume
 
 # =========================
-# GEN PALLET (INBOUND) + DEBUG
+# GEN PALLET (INBOUND)
+# DEBUG IMAGE ONLY
 # =========================
 def gen_pallet(img, debug=True):
 
     if img is None or img.size == 0:
         return 0
 
-    original = img.copy()
-
+    # =========================
+    # RESIZE IMAGE
+    # =========================
     img = cv2.resize(img, (640, 480))
     h, w = img.shape[:2]
 
@@ -728,10 +730,13 @@ def gen_pallet(img, debug=True):
     # =========================
     # COLOR SPACE
     # =========================
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(
+        roi,
+        cv2.COLOR_BGR2HSV
+    )
 
     # =========================
-    # COLOR MASKS
+    # DETECT BROWN CARTON / WOOD / PALLET
     # =========================
     brown_mask = cv2.inRange(
         hsv,
@@ -739,12 +744,18 @@ def gen_pallet(img, debug=True):
         (35, 255, 255)
     )
 
+    # =========================
+    # DETECT GREEN PALLET / GREEN OBJECT
+    # =========================
     green_mask = cv2.inRange(
         hsv,
         (35, 40, 40),
         (95, 255, 255)
     )
 
+    # =========================
+    # COMBINE MASK
+    # =========================
     raw_mask = cv2.bitwise_or(
         brown_mask,
         green_mask
@@ -752,21 +763,22 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # MORPHOLOGY
+    # รวมพื้นที่ที่แตกเป็นจุด ๆ และลด noise เล็ก ๆ
     # =========================
     kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (7, 7)
     )
 
-    morph_mask = cv2.morphologyEx(
+    mask = cv2.morphologyEx(
         raw_mask,
         cv2.MORPH_CLOSE,
         kernel,
         iterations=2
     )
 
-    morph_mask = cv2.morphologyEx(
-        morph_mask,
+    mask = cv2.morphologyEx(
+        mask,
         cv2.MORPH_OPEN,
         kernel,
         iterations=1
@@ -776,52 +788,74 @@ def gen_pallet(img, debug=True):
     # FIND CONTOURS
     # =========================
     contours, _ = cv2.findContours(
-        morph_mask,
+        mask,
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
 
     pallet_count = 0
+
+    # debug images
     debug_box = roi.copy()
     debug_contour = roi.copy()
+    debug_overlay = roi.copy()
 
+    # เกณฑ์พื้นที่ขั้นต่ำ
     min_area = rh * rw * 0.005
 
-    debug_lines = []
-    debug_lines.append("INBOUND PALLET DEBUG")
-    debug_lines.append("=" * 40)
-    debug_lines.append(f"image_size_resized: {w}x{h}")
-    debug_lines.append(f"roi: x={x1}:{x2}, y={y1}:{y2}")
-    debug_lines.append(f"roi_size: {rw}x{rh}")
-    debug_lines.append(f"min_area: {min_area:.2f}")
-    debug_lines.append(f"total_contours: {len(contours)}")
-    debug_lines.append("")
+    print("=" * 50)
+    print("INBOUND DEBUG")
+    print(f"ROI SIZE: {rw}x{rh}")
+    print(f"TOTAL CONTOURS: {len(contours)}")
+    print(f"MIN AREA: {min_area:.2f}")
 
+    # =========================
+    # CREATE OVERLAY MASK
+    # =========================
+    mask_color = roi.copy()
+
+    # พื้นที่ที่ตรวจจับได้ ให้เป็นสีเขียว
+    mask_color[mask > 0] = (
+        0,
+        255,
+        0
+    )
+
+    debug_overlay = cv2.addWeighted(
+        roi,
+        0.75,
+        mask_color,
+        0.25,
+        0
+    )
+
+    # =========================
+    # FILTER CONTOURS
+    # =========================
     for idx, cnt in enumerate(contours, start=1):
 
         area = cv2.contourArea(cnt)
+
         x, y, bw, bh = cv2.boundingRect(cnt)
 
-        if bh == 0:
-            aspect = 0
-        else:
-            aspect = bw / float(bh)
+        if bh <= 0 or bw <= 0:
+            continue
+
+        aspect = bw / float(bh)
 
         passed_area = area >= min_area
         passed_aspect = 0.4 < aspect < 4.5
         passed = passed_area and passed_aspect
 
-        debug_lines.append(
-            f"contour_{idx}: "
-            f"area={area:.2f}, "
+        print(
+            f"CONTOUR {idx}: "
+            f"area={area:.1f}, "
             f"box=({x},{y},{bw},{bh}), "
             f"aspect={aspect:.2f}, "
-            f"passed_area={passed_area}, "
-            f"passed_aspect={passed_aspect}, "
             f"passed={passed}"
         )
 
-        # วาด contour ทุกอัน สีเหลือง
+        # วาด contour ทุกอันที่เจอ สีเหลือง
         cv2.drawContours(
             debug_contour,
             [cnt],
@@ -830,7 +864,7 @@ def gen_pallet(img, debug=True):
             2
         )
 
-        # วาดกล่องทุกอันที่เจอ สีเทา
+        # วาดกรอบเบื้องต้นทุก object สีเทา
         cv2.rectangle(
             debug_box,
             (x, y),
@@ -839,11 +873,14 @@ def gen_pallet(img, debug=True):
             1
         )
 
-        # ถ้าผ่านเงื่อนไข นับเป็น pallet
+        # =========================
+        # PASSED = นับเป็น pallet
+        # =========================
         if passed:
+
             pallet_count += 1
 
-            # วาดกล่องที่ผ่าน สีเขียว
+            # กรอบสีเขียว = นับจริง
             cv2.rectangle(
                 debug_box,
                 (x, y),
@@ -855,15 +892,17 @@ def gen_pallet(img, debug=True):
             cv2.putText(
                 debug_box,
                 str(pallet_count),
-                (x, max(20, y - 8)),
+                (x, max(25, y - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
                 (0, 255, 0),
                 2,
                 cv2.LINE_AA
             )
+
         else:
-            # วาดกล่องที่ไม่ผ่าน สีแดง
+
+            # กรอบสีแดง = เจอแต่ไม่ผ่านเงื่อนไข
             cv2.rectangle(
                 debug_box,
                 (x, y),
@@ -872,41 +911,70 @@ def gen_pallet(img, debug=True):
                 2
             )
 
-    debug_lines.append("")
-    debug_lines.append(f"PALLET COUNT: {pallet_count}")
-
     print(f"PALLET COUNT: {pallet_count}")
+    print("=" * 50)
 
     # =========================
     # DEBUG OUTPUT
+    # ใช้ชื่อไฟล์เดิมที่ระบบ /debug รองรับอยู่แล้ว
     # =========================
     if debug:
 
-        # Overlay mask บน ROI
-        mask_color = roi.copy()
-        mask_color[morph_mask > 0] = (0, 255, 0)
-
-        debug_overlay = cv2.addWeighted(
-            roi,
-            0.75,
-            mask_color,
-            0.25,
-            0
+        # ภาพ ROI ที่ใช้ตรวจจับ
+        save_debug(
+            "debug_original.jpg",
+            roi
         )
 
-        save_debug("debug_inbound_original.jpg", img)
-        save_debug("debug_inbound_roi.jpg", roi)
-        save_debug("debug_inbound_brown.jpg", brown_mask)
-        save_debug("debug_inbound_green.jpg", green_mask)
-        save_debug("debug_inbound_mask.jpg", raw_mask)
-        save_debug("debug_inbound_morph.jpg", morph_mask)
-        save_debug("debug_inbound_box.jpg", debug_box)
-        save_debug("debug_inbound_overlay.jpg", debug_overlay)
-        save_debug("debug_inbound_contour.jpg", debug_contour)
+        # mask สีน้ำตาล
+        save_debug(
+            "debug_brown.jpg",
+            brown_mask
+        )
 
-        save_debug_text(
-            "debug_inbound_summary.txt",
-            "\n".join(debug_lines)
+        # mask สีเขียว
+        save_debug(
+            "debug_green.jpg",
+            green_mask
+        )
+
+        # mask รวมหลัง morphology
+        save_debug(
+            "debug_cargo.jpg",
+            mask
+        )
+
+        # overlay สีเขียวบนพื้นที่ที่ตรวจจับได้
+        save_debug(
+            "debug_overlay.jpg",
+            debug_overlay
+        )
+
+        # contour ทั้งหมดที่ระบบมองเห็น
+        save_debug(
+            "debug_overlay_contour.jpg",
+            debug_contour
+        )
+
+        # กรอบผลลัพธ์
+        # เขียว = นับ
+        # แดง = เจอแต่ไม่ผ่าน
+        # เทา = object เบื้องต้น
+        save_debug(
+            "debug_empty.jpg",
+            debug_box
+        )
+
+        # เผื่อคุณเคยเพิ่ม route สำหรับชื่อ inbound/pallet ไว้แล้ว
+        # ถ้ายังไม่ได้เพิ่ม route ก็ไม่เป็นไร ไฟล์ยังถูก save อยู่
+        save_debug(
+            "debug_pallet_mask.jpg",
+            mask
+        )
+
+        save_debug(
+            "debug_pallet_box.jpg",
+            debug_box
         )
 
     return pallet_count
