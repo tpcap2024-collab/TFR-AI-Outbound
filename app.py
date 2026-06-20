@@ -699,7 +699,7 @@ def _volume(img, debug=True, return_empty=False):
 
 # =========================
 # GEN PALLET (INBOUND)
-# DEBUG IMAGE ONLY
+# DEBUG IMAGE ONLY + PALLET SIZE FILTER
 # =========================
 def gen_pallet(img, debug=True):
 
@@ -715,10 +715,10 @@ def gen_pallet(img, debug=True):
     # =========================
     # ROI กลางภาพ
     # =========================
-    y1 = int(h * 0.2)
-    y2 = int(h * 0.9)
-    x1 = int(w * 0.1)
-    x2 = int(w * 0.9)
+    y1 = int(h * 0.18)
+    y2 = int(h * 0.88)
+    x1 = int(w * 0.05)
+    x2 = int(w * 0.95)
 
     roi = img[y1:y2, x1:x2]
 
@@ -728,10 +728,32 @@ def gen_pallet(img, debug=True):
     rh, rw = roi.shape[:2]
 
     # =========================
+    # LIGHT NORMALIZATION
+    # =========================
+    lab = cv2.cvtColor(
+        roi,
+        cv2.COLOR_BGR2LAB
+    )
+
+    l, a, b = cv2.split(lab)
+
+    clahe = cv2.createCLAHE(
+        clipLimit=2.0,
+        tileGridSize=(8, 8)
+    )
+
+    l = clahe.apply(l)
+
+    roi_norm = cv2.cvtColor(
+        cv2.merge((l, a, b)),
+        cv2.COLOR_LAB2BGR
+    )
+
+    # =========================
     # COLOR SPACE
     # =========================
     hsv = cv2.cvtColor(
-        roi,
+        roi_norm,
         cv2.COLOR_BGR2HSV
     )
 
@@ -740,8 +762,8 @@ def gen_pallet(img, debug=True):
     # =========================
     brown_mask = cv2.inRange(
         hsv,
-        (5, 40, 40),
-        (35, 255, 255)
+        (5, 35, 35),
+        (35, 255, 245)
     )
 
     # =========================
@@ -749,7 +771,7 @@ def gen_pallet(img, debug=True):
     # =========================
     green_mask = cv2.inRange(
         hsv,
-        (35, 40, 40),
+        (35, 35, 35),
         (95, 255, 255)
     )
 
@@ -762,25 +784,42 @@ def gen_pallet(img, debug=True):
     )
 
     # =========================
-    # MORPHOLOGY
-    # รวมพื้นที่ที่แตกเป็นจุด ๆ และลด noise เล็ก ๆ
+    # REMOVE OUTER BORDER AREA
+    # ลดโอกาสจับขอบรถ / ขอบตู้ / เส้นใหญ่รอบภาพ
     # =========================
-    kernel = cv2.getStructuringElement(
+    border_cut = int(min(rh, rw) * 0.015)
+
+    if border_cut > 0:
+        raw_mask[:border_cut, :] = 0
+        raw_mask[rh - border_cut:, :] = 0
+        raw_mask[:, :border_cut] = 0
+        raw_mask[:, rw - border_cut:] = 0
+
+    # =========================
+    # MORPHOLOGY
+    # ใช้ kernel ไม่ใหญ่เกินไป เพื่อไม่ให้พาเลทหลายช่องรวมเป็นก้อนใหญ่
+    # =========================
+    kernel_close = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (7, 7)
+        (5, 5)
+    )
+
+    kernel_open = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (3, 3)
     )
 
     mask = cv2.morphologyEx(
         raw_mask,
         cv2.MORPH_CLOSE,
-        kernel,
-        iterations=2
+        kernel_close,
+        iterations=1
     )
 
     mask = cv2.morphologyEx(
         mask,
         cv2.MORPH_OPEN,
-        kernel,
+        kernel_open,
         iterations=1
     )
 
@@ -795,26 +834,43 @@ def gen_pallet(img, debug=True):
 
     pallet_count = 0
 
-    # debug images
     debug_box = roi.copy()
     debug_contour = roi.copy()
-    debug_overlay = roi.copy()
 
-    # เกณฑ์พื้นที่ขั้นต่ำ
-    min_area = rh * rw * 0.005
+    # =========================
+    # PALLET SIZE CONFIG
+    # อ้างอิงจากภาพ resize 640x480 และ ROI ประมาณ 576x336
+    # ปรับได้ถ้าหน้างานพาเลทใหญ่/เล็กกว่านี้
+    # =========================
+
+    # ขนาดขั้นต่ำของพาเลท
+    min_w = int(rw * 0.055)
+    min_h = int(rh * 0.070)
+    min_area = rh * rw * 0.0025
+
+    # ขนาดสูงสุดของพาเลท
+    # ถ้าใหญ่กว่านี้ให้ถือว่าเป็นตู้ใหญ่ / โครงรถ / พื้นที่รวมหลายพาเลท
+    max_w = int(rw * 0.330)
+    max_h = int(rh * 0.360)
+    max_area = rh * rw * 0.080
+
+    # aspect ratio ของ pallet/carton ที่ยอมรับ
+    min_aspect = 0.45
+    max_aspect = 4.20
 
     print("=" * 50)
     print("INBOUND DEBUG")
     print(f"ROI SIZE: {rw}x{rh}")
     print(f"TOTAL CONTOURS: {len(contours)}")
-    print(f"MIN AREA: {min_area:.2f}")
+    print(f"MIN SIZE: w>={min_w}, h>={min_h}, area>={min_area:.1f}")
+    print(f"MAX SIZE: w<={max_w}, h<={max_h}, area<={max_area:.1f}")
 
     # =========================
     # CREATE OVERLAY MASK
     # =========================
     mask_color = roi.copy()
 
-    # พื้นที่ที่ตรวจจับได้ ให้เป็นสีเขียว
+    # พื้นที่ที่ระบบตรวจจับสีได้ ให้เป็นสีเขียวอ่อน
     mask_color[mask > 0] = (
         0,
         255,
@@ -830,7 +886,7 @@ def gen_pallet(img, debug=True):
     )
 
     # =========================
-    # FILTER CONTOURS
+    # FILTER CONTOURS BY PALLET SIZE
     # =========================
     for idx, cnt in enumerate(contours, start=1):
 
@@ -843,34 +899,96 @@ def gen_pallet(img, debug=True):
 
         aspect = bw / float(bh)
 
-        passed_area = area >= min_area
-        passed_aspect = 0.4 < aspect < 4.5
-        passed = passed_area and passed_aspect
+        # =========================
+        # SIZE CHECK
+        # =========================
+        passed_min_width = bw >= min_w
+        passed_min_height = bh >= min_h
+        passed_min_area = area >= min_area
+
+        passed_max_width = bw <= max_w
+        passed_max_height = bh <= max_h
+        passed_max_area = area <= max_area
+
+        passed_aspect = min_aspect <= aspect <= max_aspect
+
+        # =========================
+        # BORDER CHECK
+        # ถ้า object ใหญ่และแตะขอบ ROI ให้ถือว่าเป็นตู้ใหญ่/โครงรถ
+        # =========================
+        margin = int(min(rh, rw) * 0.025)
+
+        touch_left = x <= margin
+        touch_top = y <= margin
+        touch_right = (x + bw) >= (rw - margin)
+        touch_bottom = (y + bh) >= (rh - margin)
+
+        touch_border = (
+            touch_left or
+            touch_top or
+            touch_right or
+            touch_bottom
+        )
+
+        large_object = (
+            bw > int(rw * 0.45) or
+            bh > int(rh * 0.45) or
+            area > rh * rw * 0.12
+        )
+
+        border_big = touch_border and large_object
+
+        # =========================
+        # FINAL PASS
+        # =========================
+        passed = (
+            passed_min_width and
+            passed_min_height and
+            passed_min_area and
+            passed_max_width and
+            passed_max_height and
+            passed_max_area and
+            passed_aspect and
+            not border_big
+        )
+
+        # =========================
+        # REJECT REASON FOR DEBUG
+        # =========================
+        reject_reason = ""
+
+        if not passed_min_width or not passed_min_height or not passed_min_area:
+            reject_reason = "TOO_SMALL"
+
+        elif not passed_max_width or not passed_max_height or not passed_max_area:
+            reject_reason = "TOO_BIG"
+
+        elif not passed_aspect:
+            reject_reason = "BAD_RATIO"
+
+        elif border_big:
+            reject_reason = "BORDER_BIG"
+
+        else:
+            reject_reason = "PASS"
 
         print(
             f"CONTOUR {idx}: "
             f"area={area:.1f}, "
             f"box=({x},{y},{bw},{bh}), "
             f"aspect={aspect:.2f}, "
-            f"passed={passed}"
+            f"touch_border={touch_border}, "
+            f"large_object={large_object}, "
+            f"result={reject_reason}"
         )
 
-        # วาด contour ทุกอันที่เจอ สีเหลือง
+        # วาด contour ทุกอัน สีเหลือง
         cv2.drawContours(
             debug_contour,
             [cnt],
             -1,
             (0, 255, 255),
             2
-        )
-
-        # วาดกรอบเบื้องต้นทุก object สีเทา
-        cv2.rectangle(
-            debug_box,
-            (x, y),
-            (x + bw, y + bh),
-            (180, 180, 180),
-            1
         )
 
         # =========================
@@ -902,7 +1020,7 @@ def gen_pallet(img, debug=True):
 
         else:
 
-            # กรอบสีแดง = เจอแต่ไม่ผ่านเงื่อนไข
+            # กรอบสีแดง = เจอแต่ไม่ผ่าน
             cv2.rectangle(
                 debug_box,
                 (x, y),
@@ -911,12 +1029,23 @@ def gen_pallet(img, debug=True):
                 2
             )
 
+            cv2.putText(
+                debug_box,
+                reject_reason,
+                (x, min(rh - 8, y + bh + 18)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 0, 255),
+                1,
+                cv2.LINE_AA
+            )
+
     print(f"PALLET COUNT: {pallet_count}")
     print("=" * 50)
 
     # =========================
     # DEBUG OUTPUT
-    # ใช้ชื่อไฟล์เดิมที่ระบบ /debug รองรับอยู่แล้ว
+    # ใช้ชื่อไฟล์เดิมที่ route debug รองรับอยู่แล้ว
     # =========================
     if debug:
 
@@ -924,6 +1053,12 @@ def gen_pallet(img, debug=True):
         save_debug(
             "debug_original.jpg",
             roi
+        )
+
+        # ภาพ ROI หลัง normalize แสง
+        save_debug(
+            "debug_normalized.jpg",
+            roi_norm
         )
 
         # mask สีน้ำตาล
@@ -938,46 +1073,13 @@ def gen_pallet(img, debug=True):
             green_mask
         )
 
-        # mask รวมหลัง morphology
+        # mask รวมดิบ
         save_debug(
-            "debug_cargo.jpg",
-            mask
+            "debug_container.jpg",
+            raw_mask
         )
 
-        # overlay สีเขียวบนพื้นที่ที่ตรวจจับได้
-        save_debug(
-            "debug_overlay.jpg",
-            debug_overlay
-        )
 
-        # contour ทั้งหมดที่ระบบมองเห็น
-        save_debug(
-            "debug_overlay_contour.jpg",
-            debug_contour
-        )
-
-        # กรอบผลลัพธ์
-        # เขียว = นับ
-        # แดง = เจอแต่ไม่ผ่าน
-        # เทา = object เบื้องต้น
-        save_debug(
-            "debug_empty.jpg",
-            debug_box
-        )
-
-        # เผื่อคุณเคยเพิ่ม route สำหรับชื่อ inbound/pallet ไว้แล้ว
-        # ถ้ายังไม่ได้เพิ่ม route ก็ไม่เป็นไร ไฟล์ยังถูก save อยู่
-        save_debug(
-            "debug_pallet_mask.jpg",
-            mask
-        )
-
-        save_debug(
-            "debug_pallet_box.jpg",
-            debug_box
-        )
-
-    return pallet_count
     
 # =========================
 # UPDATE APPSHEET
