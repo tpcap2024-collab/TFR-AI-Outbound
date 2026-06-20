@@ -963,11 +963,6 @@ def predict():
         return jsonify({
                 "error": f"unknown project: {project}"
                 }), 400
-        else:
-
-            return jsonify({
-                "error": f"unknown project: {project}"
-            }), 400
 
         # =========================
         # UPDATE SHEET
