@@ -876,7 +876,7 @@ def predict():
         elif project.lower() == "inbound":
 
             # Placeholder รอระบบนับพาเลท
-            result_text = "Inbound Pending"
+            result_text = "0"
 
             print("INBOUND:", result_text)
 
