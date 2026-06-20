@@ -702,7 +702,7 @@ def _volume(img, debug=True, return_empty=False):
 # DYNAMIC PALLET DETECTION
 # - Detect cream cage/pallet dynamically inside main cream block
 # - Detect green rack/pallet outside cream block
-# - Prevent overlap NMS
+# - Prevent overlap counting by NMS
 # - Debug image only, uses existing debug filenames
 # =========================
 def gen_pallet(img, debug=True):
@@ -1384,21 +1384,70 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # GREEN OUTSIDE CREAM BLOCK
-    # นับเฉพาะ rack/pallet เขียวที่อยู่นอก cream block
+    # นับ rack/pallet เขียวด้านนอก cream block แบบ union
+    # เหตุผล: rack เขียวด้านซ้ายมักแตกเป็นหลาย contour
+    # ถ้านับ contour ทีละอันจะโดน filter ทิ้งหรือแตกเป็นหลายชิ้น
     # =========================
+    green_candidates = []
+
+    # สร้าง mask เฉพาะพื้นที่นอก cream block
+    green_outside = green_clean.copy()
+
+    # ลบพื้นที่ใน cream block ออกทั้งหมด
+    # เพื่อไม่ให้นับของเขียวที่อยู่ในกรงครีมซ้ำ
+    cv2.rectangle(
+        green_outside,
+        (bx, by),
+        (bx + bw, by + bh),
+        0,
+        thickness=-1
+    )
+
+    # ตัดแถบล่างรถออก กันเส้นเขียว/คานรถด้านล่าง
+    green_outside[int(rh * 0.78):, :] = 0
+
+    # ตัดหลังคา/ขอบบนออกเล็กน้อย
+    green_outside[:int(rh * 0.05), :] = 0
+
+    # เน้นโซนซ้ายของ cream block ก่อน
+    # เพราะจากภาพ green rack อยู่ด้านซ้ายของ block ครีม
+    left_limit = max(
+        1,
+        bx + int(bw * 0.03)
+    )
+
+    green_left_zone = np.zeros_like(green_outside)
+
+    green_left_zone[:, :left_limit] = green_outside[:, :left_limit]
+
+    # รวมชิ้นส่วนเขียวที่แตกเป็นหลายเส้นให้เป็นก้อนเดียว
+    green_left_zone = cv2.morphologyEx(
+        green_left_zone,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (25, 17)),
+        iterations=3
+    )
+
+    green_left_zone = cv2.morphologyEx(
+        green_left_zone,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+        iterations=1
+    )
+
     green_contours, _ = cv2.findContours(
-        green_clean,
+        green_left_zone,
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
 
-    green_candidates = []
+    green_boxes = []
 
     for cnt in green_contours:
 
         area = cv2.contourArea(cnt)
 
-        if area < rh * rw * 0.0025:
+        if area < rh * rw * 0.002:
             continue
 
         x, y, gw, gh = cv2.boundingRect(cnt)
@@ -1408,101 +1457,127 @@ def gen_pallet(img, debug=True):
 
         aspect = gw / float(gh)
 
-        gx = x + gw / 2.0
-        gy = y + gh / 2.0
-
-        inside_cream_block = (
-            bx <= gx <= bx + bw and
-            by <= gy <= by + bh
-        )
-
-        if inside_cream_block:
-            continue
-
-        # กันเส้นเขียวล่างรถ
-        if y > rh * 0.78:
-            continue
-
+        # เงื่อนไขสำหรับ rack/pallet เขียวด้านซ้าย
         passed_size = (
-            gw >= rw * 0.075 and
+            gw >= rw * 0.060 and
             gh >= rh * 0.120 and
-            area >= rh * rw * 0.0025
+            area >= rh * rw * 0.002
         )
 
         passed_max = (
-            gw <= rw * 0.340 and
-            gh <= rh * 0.650 and
-            area <= rh * rw * 0.120
+            gw <= rw * 0.360 and
+            gh <= rh * 0.700 and
+            area <= rh * rw * 0.140
         )
 
         passed_aspect = (
-            0.35 <= aspect <= 4.50
+            0.30 <= aspect <= 5.50
         )
 
-        if not (passed_size and passed_max and passed_aspect):
-            continue
+        # กันคาน/เส้นยาวล่างรถ
+        not_bottom_bar = y < rh * 0.75
 
-        score = float(area) / float(rh * rw) * 1000.0
+        # ต้องอยู่ซ้ายของ cream block เป็นหลัก
+        is_left_of_cream = x < bx
 
-        green_candidates.append(
-            {
-                "box": (x, y, gw, gh),
-                "score": score + 50.0,
-                "type": "green",
-                "source": "green"
-            }
-        )
+        if (
+            passed_size and
+            passed_max and
+            passed_aspect and
+            not_bottom_bar and
+            is_left_of_cream
+        ):
+            green_boxes.append((x, y, gw, gh, area))
 
     # =========================
-    # MERGE GREEN RACK CANDIDATES
-    # ถ้า rack เขียวแตกเป็นหลาย contour ให้รวมเป็น 1
+    # รวม green boxes ให้เป็น rack เดียว
     # =========================
-    if len(green_candidates) > 1:
+    if len(green_boxes) > 0:
 
-        selected_green = nms(
-            green_candidates,
-            iou_threshold=0.10
+        xs = []
+        ys = []
+        xes = []
+        yes = []
+        total_area = 0.0
+
+        for x, y, gw, gh, area in green_boxes:
+            xs.append(x)
+            ys.append(y)
+            xes.append(x + gw)
+            yes.append(y + gh)
+            total_area += area
+
+        ux = min(xs)
+        uy = min(ys)
+        ux2 = max(xes)
+        uy2 = max(yes)
+
+        uw = ux2 - ux
+        uh = uy2 - uy
+
+        union_aspect = uw / float(max(1, uh))
+
+        union_ok = (
+            uw >= rw * 0.080 and
+            uh >= rh * 0.140 and
+            uw <= rw * 0.380 and
+            uh <= rh * 0.720 and
+            0.30 <= union_aspect <= 5.80 and
+            uy < rh * 0.75
         )
 
-        if len(selected_green) > 1:
-
-            xs = []
-            ys = []
-            xes = []
-            yes = []
-
-            for g in selected_green:
-                x, y, gw, gh = g["box"]
-
-                xs.append(x)
-                ys.append(y)
-                xes.append(x + gw)
-                yes.append(y + gh)
-
-            union_box = (
-                min(xs),
-                min(ys),
-                max(xes) - min(xs),
-                max(yes) - min(ys)
+        if union_ok:
+            green_candidates.append(
+                {
+                    "box": (ux, uy, uw, uh),
+                    "score": 120.0 + total_area / float(rh * rw) * 1000.0,
+                    "type": "green",
+                    "source": "green_union"
+                }
             )
 
-            ux, uy, uw, uh = union_box
+    # =========================
+    # FALLBACK GREEN CHECK
+    # ถ้า contour ไม่ผ่าน แต่พื้นที่เขียวด้านซ้ายมีมากพอ ให้นับเป็น 1
+    # =========================
+    if len(green_candidates) == 0:
 
-            if (
-                uw <= rw * 0.35 and
-                uh <= rh * 0.70 and
-                uy < rh * 0.78
-            ):
-                green_candidates = [
-                    {
-                        "box": union_box,
-                        "score": 100.0,
-                        "type": "green",
-                        "source": "green"
-                    }
-                ]
-            else:
-                green_candidates = selected_green
+        green_pixels = cv2.countNonZero(green_left_zone)
+
+        left_area = float(rh * max(1, left_limit))
+        green_ratio_left = green_pixels / max(1.0, left_area)
+
+        if green_ratio_left >= 0.012:
+
+            ys, xs = np.where(green_left_zone > 0)
+
+            if xs.size > 0 and ys.size > 0:
+
+                ux = int(xs.min())
+                uy = int(ys.min())
+                ux2 = int(xs.max())
+                uy2 = int(ys.max())
+
+                uw = ux2 - ux + 1
+                uh = uy2 - uy + 1
+
+                fallback_ok = (
+                    uw >= rw * 0.060 and
+                    uh >= rh * 0.120 and
+                    uw <= rw * 0.400 and
+                    uh <= rh * 0.750 and
+                    uy < rh * 0.75
+                )
+
+                if fallback_ok:
+                    green_candidates.append(
+                        {
+                            "box": (ux, uy, uw, uh),
+                            "score": 80.0,
+                            "type": "green",
+                            "source": "green_fallback"
+                        }
+                    )
 
     candidates.extend(green_candidates)
 
