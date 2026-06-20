@@ -42,7 +42,7 @@ def download_image(url):
             timeout=15,
             allow_redirects=True,
             headers={
-                "User-Agent": "Mozilla/5.0"
+                "User-At": "Mozilla/5.0"
             }
         )
 
@@ -106,7 +106,7 @@ def clean_mask(mask, min_area_ratio=0.002):
 # =========================
 # BALANCED VOLUME MODEL
 # =========================
-def gen_volume(img, debug=True, return_empty=False):
+def _volume(img, debug=True, return_empty=False):
 
     if img is None or img.size == 0:
         return 0
@@ -698,79 +698,216 @@ def gen_volume(img, debug=True, return_empty=False):
     return output_volume
 
 # =========================
-# GEN PALLET (INBOUND)
+# GEN PALLET (INBOUND) + DEBUG
 # =========================
 def gen_pallet(img, debug=True):
 
     if img is None or img.size == 0:
         return 0
 
+    original = img.copy()
+
     img = cv2.resize(img, (640, 480))
     h, w = img.shape[:2]
 
+    # =========================
     # ROI กลางภาพ
-    roi = img[
-        int(h * 0.2):int(h * 0.9),
-        int(w * 0.1):int(w * 0.9)
-    ]
+    # =========================
+    y1 = int(h * 0.2)
+    y2 = int(h * 0.9)
+    x1 = int(w * 0.1)
+    x2 = int(w * 0.9)
+
+    roi = img[y1:y2, x1:x2]
 
     if roi.size == 0:
         return 0
 
+    rh, rw = roi.shape[:2]
+
+    # =========================
+    # COLOR SPACE
+    # =========================
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-    # detect pallet/carton
-    brown_mask = cv2.inRange(hsv, (5, 40, 40), (35, 255, 255))
-    green_mask = cv2.inRange(hsv, (35, 40, 40), (95, 255, 255))
+    # =========================
+    # COLOR MASKS
+    # =========================
+    brown_mask = cv2.inRange(
+        hsv,
+        (5, 40, 40),
+        (35, 255, 255)
+    )
 
-    mask = cv2.bitwise_or(brown_mask, green_mask)
+    green_mask = cv2.inRange(
+        hsv,
+        (35, 40, 40),
+        (95, 255, 255)
+    )
 
-    # morphology
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, 2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, 1)
+    raw_mask = cv2.bitwise_or(
+        brown_mask,
+        green_mask
+    )
 
+    # =========================
+    # MORPHOLOGY
+    # =========================
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (7, 7)
+    )
+
+    morph_mask = cv2.morphologyEx(
+        raw_mask,
+        cv2.MORPH_CLOSE,
+        kernel,
+        iterations=2
+    )
+
+    morph_mask = cv2.morphologyEx(
+        morph_mask,
+        cv2.MORPH_OPEN,
+        kernel,
+        iterations=1
+    )
+
+    # =========================
+    # FIND CONTOURS
+    # =========================
     contours, _ = cv2.findContours(
-        mask,
+        morph_mask,
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
 
     pallet_count = 0
-    debug_img = roi.copy()
+    debug_box = roi.copy()
+    debug_contour = roi.copy()
 
-    min_area = roi.shape[0] * roi.shape[1] * 0.005
+    min_area = rh * rw * 0.005
 
-    for cnt in contours:
+    debug_lines = []
+    debug_lines.append("INBOUND PALLET DEBUG")
+    debug_lines.append("=" * 40)
+    debug_lines.append(f"image_size_resized: {w}x{h}")
+    debug_lines.append(f"roi: x={x1}:{x2}, y={y1}:{y2}")
+    debug_lines.append(f"roi_size: {rw}x{rh}")
+    debug_lines.append(f"min_area: {min_area:.2f}")
+    debug_lines.append(f"total_contours: {len(contours)}")
+    debug_lines.append("")
+
+    for idx, cnt in enumerate(contours, start=1):
+
         area = cv2.contourArea(cnt)
-
-        if area < min_area:
-            continue
-
         x, y, bw, bh = cv2.boundingRect(cnt)
 
         if bh == 0:
-            continue
+            aspect = 0
+        else:
+            aspect = bw / float(bh)
 
-        aspect = bw / float(bh)
+        passed_area = area >= min_area
+        passed_aspect = 0.4 < aspect < 4.5
+        passed = passed_area and passed_aspect
 
-        if 0.4 < aspect < 4.5:
+        debug_lines.append(
+            f"contour_{idx}: "
+            f"area={area:.2f}, "
+            f"box=({x},{y},{bw},{bh}), "
+            f"aspect={aspect:.2f}, "
+            f"passed_area={passed_area}, "
+            f"passed_aspect={passed_aspect}, "
+            f"passed={passed}"
+        )
+
+        # วาด contour ทุกอัน สีเหลือง
+        cv2.drawContours(
+            debug_contour,
+            [cnt],
+            -1,
+            (0, 255, 255),
+            2
+        )
+
+        # วาดกล่องทุกอันที่เจอ สีเทา
+        cv2.rectangle(
+            debug_box,
+            (x, y),
+            (x + bw, y + bh),
+            (180, 180, 180),
+            1
+        )
+
+        # ถ้าผ่านเงื่อนไข นับเป็น pallet
+        if passed:
             pallet_count += 1
 
-            if debug:
-                cv2.rectangle(
-                    debug_img,
-                    (x, y),
-                    (x + bw, y + bh),
-                    (0, 255, 0),
-                    2
-                )
+            # วาดกล่องที่ผ่าน สีเขียว
+            cv2.rectangle(
+                debug_box,
+                (x, y),
+                (x + bw, y + bh),
+                (0, 255, 0),
+                3
+            )
+
+            cv2.putText(
+                debug_box,
+                str(pallet_count),
+                (x, max(20, y - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA
+            )
+        else:
+            # วาดกล่องที่ไม่ผ่าน สีแดง
+            cv2.rectangle(
+                debug_box,
+                (x, y),
+                (x + bw, y + bh),
+                (0, 0, 255),
+                2
+            )
+
+    debug_lines.append("")
+    debug_lines.append(f"PALLET COUNT: {pallet_count}")
 
     print(f"PALLET COUNT: {pallet_count}")
 
+    # =========================
+    # DEBUG OUTPUT
+    # =========================
     if debug:
-        save_debug("debug_pallet_mask.jpg", mask)
-        save_debug("debug_pallet_box.jpg", debug_img)
+
+        # Overlay mask บน ROI
+        mask_color = roi.copy()
+        mask_color[morph_mask > 0] = (0, 255, 0)
+
+        debug_overlay = cv2.addWeighted(
+            roi,
+            0.75,
+            mask_color,
+            0.25,
+            0
+        )
+
+        save_debug("debug_inbound_original.jpg", img)
+        save_debug("debug_inbound_roi.jpg", roi)
+        save_debug("debug_inbound_brown.jpg", brown_mask)
+        save_debug("debug_inbound_green.jpg", green_mask)
+        save_debug("debug_inbound_mask.jpg", raw_mask)
+        save_debug("debug_inbound_morph.jpg", morph_mask)
+        save_debug("debug_inbound_box.jpg", debug_box)
+        save_debug("debug_inbound_overlay.jpg", debug_overlay)
+        save_debug("debug_inbound_contour.jpg", debug_contour)
+
+        save_debug_text(
+            "debug_inbound_summary.txt",
+            "\n".join(debug_lines)
+        )
 
     return pallet_count
     
