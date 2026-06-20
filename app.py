@@ -790,7 +790,7 @@ def update_appsheet(row_id, volume_text):
         "Action": "Edit",
         "Rows": [
             {
-                "id": row_id,
+                "ID": row_id,
                 "TFR AI": volume_text,
                 "status": "Done"
             }
