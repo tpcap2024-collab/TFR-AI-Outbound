@@ -699,7 +699,83 @@ def gen_volume(img, debug=True, return_empty=False):
 
     return output_volume
 
+# =========================
+# GEN PALLET (INBOUND)
+# =========================
+def gen_pallet(img, debug=True):
 
+    if img is None or img.size == 0:
+        return 0
+
+    img = cv2.resize(img, (640, 480))
+    h, w = img.shape[:2]
+
+    # ROI กลางภาพ
+    roi = img[
+        int(h * 0.2):int(h * 0.9),
+        int(w * 0.1):int(w * 0.9)
+    ]
+
+    if roi.size == 0:
+        return 0
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+    # detect pallet/carton
+    brown_mask = cv2.inRange(hsv, (5, 40, 40), (35, 255, 255))
+    green_mask = cv2.inRange(hsv, (35, 40, 40), (95, 255, 255))
+
+    mask = cv2.bitwise_or(brown_mask, green_mask)
+
+    # morphology
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, 2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, 1)
+
+    contours, _ = cv2.findContours(
+        mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    pallet_count = 0
+    debug_img = roi.copy()
+
+    min_area = roi.shape[0] * roi.shape[1] * 0.005
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+
+        if area < min_area:
+            continue
+
+        x, y, bw, bh = cv2.boundingRect(cnt)
+
+        if bh == 0:
+            continue
+
+        aspect = bw / float(bh)
+
+        if 0.4 < aspect < 4.5:
+            pallet_count += 1
+
+            if debug:
+                cv2.rectangle(
+                    debug_img,
+                    (x, y),
+                    (x + bw, y + bh),
+                    (0, 255, 0),
+                    2
+                )
+
+    print(f"PALLET COUNT: {pallet_count}")
+
+    if debug:
+        save_debug("debug_pallet_mask.jpg", mask)
+        save_debug("debug_pallet_box.jpg", debug_img)
+
+    return pallet_count
+    
 # =========================
 # UPDATE APPSHEET
 # =========================
