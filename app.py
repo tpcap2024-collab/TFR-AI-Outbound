@@ -1079,6 +1079,44 @@ def gen_pallet(img, debug=True):
             raw_mask
         )
 
+        # mask รวมหลัง morphology
+        save_debug(
+            "debug_cargo.jpg",
+            mask
+        )
+
+        # overlay พื้นที่ที่ตรวจจับได้
+        save_debug(
+            "debug_overlay.jpg",
+            debug_overlay
+        )
+
+        # contour ทั้งหมด
+        save_debug(
+            "debug_overlay_contour.jpg",
+            debug_contour
+        )
+
+        # กรอบผลลัพธ์
+        # เขียว = นับ
+        # แดง = ไม่นับ พร้อมเหตุผล
+        save_debug(
+            "debug_empty.jpg",
+            debug_box
+        )
+
+        # เผื่อมี route ชื่อเก่าของ inbound อยู่แล้ว
+        save_debug(
+            "debug_pallet_mask.jpg",
+            mask
+        )
+
+        save_debug(
+            "debug_pallet_box.jpg",
+            debug_box
+        )
+
+    return pallet_count
 
     
 # =========================
