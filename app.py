@@ -830,6 +830,7 @@ def predict():
 
         image_url = data.get("link")
         row_id = data.get("id")
+        project = str(data.get("project", "Outbound")).strip()
 
         # optional
         debug = bool(data.get("debug", True))
@@ -855,30 +856,51 @@ def predict():
         if img is None:
             return jsonify({"error": "image fail"}), 400
 
+       
         # =========================
         # AI PROCESS
         # =========================
-        volume = gen_volume(
-            img,
-            debug=debug,
-            return_empty=return_empty
-        )
 
-        volume_text = f"{volume}%"
+        if project.lower() == "outbound":
 
-        print("VOLUME:", volume_text)
+            volume = gen_volume(
+                img,
+                debug=debug,
+                return_empty=return_empty
+            )
+
+            result_text = f"{volume}%"
+
+            print("OUTBOUND:", result_text)
+
+        elif project.lower() == "inbound":
+
+            # Placeholder รอระบบนับพาเลท
+            result_text = "Inbound Pending"
+
+            print("INBOUND:", result_text)
+
+        else:
+
+            return jsonify({
+                "error": f"unknown project: {project}"
+            }), 400
 
         # =========================
         # UPDATE SHEET
         # =========================
-        update_appsheet(row_id, volume_text)
+        update_appsheet(
+            row_id,
+            result_text
+        )
 
         base_url = request.host_url.rstrip("/")
 
         return jsonify({
             "status": "success",
+            "project": project,
             "id": row_id,
-            "volume": volume_text,
+            "volume": result_text,
             "mode": "empty" if return_empty else "filled",
             "debug": debug,
             "debug_urls": {
