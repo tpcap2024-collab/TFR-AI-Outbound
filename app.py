@@ -700,9 +700,10 @@ def gen_volume(img, debug=True, return_empty=False):
 # =========================
 # GEN PALLET (INBOUND)
 # DYNAMIC PALLET DETECTION
-# - Detect cream cage/pallet dynamically inside main cream block
-# - Detect green rack/pallet outside cream block
+# - Cream cage/pallet: dynamic grid inside main cream block
+# - Green rack/pallet: count only outside cream block
 # - Prevent overlap counting by NMS
+# - Strict green filter to avoid false positive from dark/empty area
 # - Debug image only, uses existing debug filenames
 # =========================
 def gen_pallet(img, debug=True):
@@ -726,6 +727,7 @@ def gen_pallet(img, debug=True):
             k += 1
 
         kernel = np.ones(k, dtype=np.float32) / float(k)
+
         return np.convolve(arr, kernel, mode="same")
 
     def box_iou(a, b):
@@ -1021,6 +1023,7 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # GREEN MASK
+    # จับเฉพาะ green rack/pallet
     # =========================
     green_mask = cv2.inRange(
         hsv,
@@ -1104,7 +1107,7 @@ def gen_pallet(img, debug=True):
 
     y_region = find_dense_region(
         y_proj,
-        min_len=int(rh * 0.45),
+        min_len=int(rh * 0.40),
         threshold_ratio=0.16,
         prefer_right=False
     )
@@ -1150,7 +1153,7 @@ def gen_pallet(img, debug=True):
 
         if (
             bw >= rw * 0.35 and
-            bh >= rh * 0.40 and
+            bh >= rh * 0.35 and
             1.4 <= aspect <= 5.8
         ):
             main_box = (bx, by, bw, bh)
@@ -1383,18 +1386,15 @@ def gen_pallet(img, debug=True):
             )
 
     # =========================
-    # GREEN OUTSIDE CREAM BLOCK
-    # นับ rack/pallet เขียวด้านนอก cream block แบบ union
-    # เหตุผล: rack เขียวด้านซ้ายมักแตกเป็นหลาย contour
-    # ถ้านับ contour ทีละอันจะโดน filter ทิ้งหรือแตกเป็นหลายชิ้น
+    # GREEN OUTSIDE CREAM BLOCK - STRICT
+    # นับ rack/pallet เขียวด้านนอก cream block เท่านั้น
+    # ไม่ให้นับช่องมืด / เส้นเฉียง / คานรถ เป็น green
     # =========================
     green_candidates = []
 
-    # สร้าง mask เฉพาะพื้นที่นอก cream block
     green_outside = green_clean.copy()
 
     # ลบพื้นที่ใน cream block ออกทั้งหมด
-    # เพื่อไม่ให้นับของเขียวที่อยู่ในกรงครีมซ้ำ
     cv2.rectangle(
         green_outside,
         (bx, by),
@@ -1403,24 +1403,22 @@ def gen_pallet(img, debug=True):
         thickness=-1
     )
 
-    # ตัดแถบล่างรถออก กันเส้นเขียว/คานรถด้านล่าง
+    # ตัดล่างรถ / คานล่าง
     green_outside[int(rh * 0.78):, :] = 0
 
-    # ตัดหลังคา/ขอบบนออกเล็กน้อย
+    # ตัดบนเล็กน้อย
     green_outside[:int(rh * 0.05), :] = 0
 
-    # เน้นโซนซ้ายของ cream block ก่อน
-    # เพราะจากภาพ green rack อยู่ด้านซ้ายของ block ครีม
+    # เน้นเฉพาะพื้นที่ซ้ายของ cream block
     left_limit = max(
         1,
         bx + int(bw * 0.03)
     )
 
     green_left_zone = np.zeros_like(green_outside)
-
     green_left_zone[:, :left_limit] = green_outside[:, :left_limit]
 
-    # รวมชิ้นส่วนเขียวที่แตกเป็นหลายเส้นให้เป็นก้อนเดียว
+    # รวมโครงเขียวที่แตกเป็นหลายชิ้น
     green_left_zone = cv2.morphologyEx(
         green_left_zone,
         cv2.MORPH_CLOSE,
@@ -1457,16 +1455,53 @@ def gen_pallet(img, debug=True):
 
         aspect = gw / float(gh)
 
-        # เงื่อนไขสำหรับ rack/pallet เขียวด้านซ้าย
+        green_box_mask = green_left_zone[y:y + gh, x:x + gw]
+
+        box_area = float(max(1, gw * gh))
+        box_green_pixels = float(cv2.countNonZero(green_box_mask))
+        box_green_ratio = box_green_pixels / box_area
+
+        vertical_kernel_green = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (3, max(15, int(gh * 0.35)))
+        )
+
+        horizontal_kernel_green = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (max(15, int(gw * 0.35)), 3)
+        )
+
+        green_vertical = cv2.morphologyEx(
+            green_box_mask,
+            cv2.MORPH_OPEN,
+            vertical_kernel_green,
+            iterations=1
+        )
+
+        green_horizontal = cv2.morphologyEx(
+            green_box_mask,
+            cv2.MORPH_OPEN,
+            horizontal_kernel_green,
+            iterations=1
+        )
+
+        vertical_ratio = cv2.countNonZero(green_vertical) / box_area
+        horizontal_ratio = cv2.countNonZero(green_horizontal) / box_area
+
+        has_green_structure = (
+            vertical_ratio >= 0.004 and
+            horizontal_ratio >= 0.004
+        )
+
         passed_size = (
-            gw >= rw * 0.060 and
-            gh >= rh * 0.120 and
+            gw >= rw * 0.080 and
+            gh >= rh * 0.180 and
             area >= rh * rw * 0.002
         )
 
         passed_max = (
             gw <= rw * 0.360 and
-            gh <= rh * 0.700 and
+            gh <= rh * 0.650 and
             area <= rh * rw * 0.140
         )
 
@@ -1474,24 +1509,23 @@ def gen_pallet(img, debug=True):
             0.30 <= aspect <= 5.50
         )
 
-        # กันคาน/เส้นยาวล่างรถ
-        not_bottom_bar = y < rh * 0.75
-
-        # ต้องอยู่ซ้ายของ cream block เป็นหลัก
+        not_bottom_bar = y < rh * 0.70
         is_left_of_cream = x < bx
+
+        enough_green_density = box_green_ratio >= 0.035
 
         if (
             passed_size and
             passed_max and
             passed_aspect and
             not_bottom_bar and
-            is_left_of_cream
+            is_left_of_cream and
+            enough_green_density and
+            has_green_structure
         ):
             green_boxes.append((x, y, gw, gh, area))
 
-    # =========================
     # รวม green boxes ให้เป็น rack เดียว
-    # =========================
     if len(green_boxes) > 0:
 
         xs = []
@@ -1517,13 +1551,52 @@ def gen_pallet(img, debug=True):
 
         union_aspect = uw / float(max(1, uh))
 
+        union_mask = green_left_zone[uy:uy + uh, ux:ux + uw]
+
+        union_area = float(max(1, uw * uh))
+        union_green_ratio = cv2.countNonZero(union_mask) / union_area
+
+        vertical_kernel_union = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (3, max(15, int(uh * 0.35)))
+        )
+
+        horizontal_kernel_union = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (max(15, int(uw * 0.35)), 3)
+        )
+
+        union_vertical = cv2.morphologyEx(
+            union_mask,
+            cv2.MORPH_OPEN,
+            vertical_kernel_union,
+            iterations=1
+        )
+
+        union_horizontal = cv2.morphologyEx(
+            union_mask,
+            cv2.MORPH_OPEN,
+            horizontal_kernel_union,
+            iterations=1
+        )
+
+        union_vertical_ratio = cv2.countNonZero(union_vertical) / union_area
+        union_horizontal_ratio = cv2.countNonZero(union_horizontal) / union_area
+
+        union_has_structure = (
+            union_vertical_ratio >= 0.004 and
+            union_horizontal_ratio >= 0.004
+        )
+
         union_ok = (
             uw >= rw * 0.080 and
-            uh >= rh * 0.140 and
-            uw <= rw * 0.380 and
-            uh <= rh * 0.720 and
-            0.30 <= union_aspect <= 5.80 and
-            uy < rh * 0.75
+            uh >= rh * 0.180 and
+            uw <= rw * 0.360 and
+            uh <= rh * 0.650 and
+            0.30 <= union_aspect <= 5.50 and
+            uy < rh * 0.70 and
+            union_green_ratio >= 0.035 and
+            union_has_structure
         )
 
         if union_ok:
@@ -1532,13 +1605,14 @@ def gen_pallet(img, debug=True):
                     "box": (ux, uy, uw, uh),
                     "score": 120.0 + total_area / float(rh * rw) * 1000.0,
                     "type": "green",
-                    "source": "green_union"
+                    "source": "green_union_strict"
                 }
             )
 
     # =========================
-    # FALLBACK GREEN CHECK
+    # FALLBACK GREEN CHECK - VERY STRICT
     # ถ้า contour ไม่ผ่าน แต่พื้นที่เขียวด้านซ้ายมีมากพอ ให้นับเป็น 1
+    # เพิ่มเงื่อนไขกัน false positive จากช่องมืด / คานรถ / เส้นเฉียง
     # =========================
     if len(green_candidates) == 0:
 
@@ -1561,12 +1635,52 @@ def gen_pallet(img, debug=True):
                 uw = ux2 - ux + 1
                 uh = uy2 - uy + 1
 
+                green_box_mask = green_left_zone[uy:uy + uh, ux:ux + uw]
+
+                box_area = float(max(1, uw * uh))
+                box_green_pixels = float(cv2.countNonZero(green_box_mask))
+                box_green_ratio = box_green_pixels / box_area
+
+                vertical_kernel_green = cv2.getStructuringElement(
+                    cv2.MORPH_RECT,
+                    (3, max(15, int(uh * 0.35)))
+                )
+
+                horizontal_kernel_green = cv2.getStructuringElement(
+                    cv2.MORPH_RECT,
+                    (max(15, int(uw * 0.35)), 3)
+                )
+
+                green_vertical = cv2.morphologyEx(
+                    green_box_mask,
+                    cv2.MORPH_OPEN,
+                    vertical_kernel_green,
+                    iterations=1
+                )
+
+                green_horizontal = cv2.morphologyEx(
+                    green_box_mask,
+                    cv2.MORPH_OPEN,
+                    horizontal_kernel_green,
+                    iterations=1
+                )
+
+                vertical_ratio = cv2.countNonZero(green_vertical) / box_area
+                horizontal_ratio = cv2.countNonZero(green_horizontal) / box_area
+
+                has_green_structure = (
+                    vertical_ratio >= 0.004 and
+                    horizontal_ratio >= 0.004
+                )
+
                 fallback_ok = (
-                    uw >= rw * 0.060 and
-                    uh >= rh * 0.120 and
-                    uw <= rw * 0.400 and
-                    uh <= rh * 0.750 and
-                    uy < rh * 0.75
+                    uw >= rw * 0.080 and
+                    uh >= rh * 0.180 and
+                    uw <= rw * 0.360 and
+                    uh <= rh * 0.650 and
+                    uy < rh * 0.70 and
+                    box_green_ratio >= 0.035 and
+                    has_green_structure
                 )
 
                 if fallback_ok:
@@ -1575,7 +1689,7 @@ def gen_pallet(img, debug=True):
                             "box": (ux, uy, uw, uh),
                             "score": 80.0,
                             "type": "green",
-                            "source": "green_fallback"
+                            "source": "green_fallback_strict"
                         }
                     )
 
