@@ -896,46 +896,42 @@ def debug_list():
 @app.route("/predict", methods=["POST"])
 def predict():
 
+    row_id = None
+
     try:
         data = request.get_json(silent=True)
+
+        print("=" * 50)
+        print("REQUEST JSON =", data)
+        print("=" * 50)
 
         if not data:
             return jsonify({"error": "no json"}), 400
 
         image_url = data.get("link")
         row_id = data.get("id")
-        project = str(data.get("project", "Outbound")).strip()
+        project = str(data.get("project", "outbound")).strip().lower()
 
-        # optional
         debug = bool(data.get("debug", True))
         return_empty = bool(data.get("return_empty", False))
 
         if not image_url or not row_id:
             return jsonify({"error": "missing data"}), 400
 
-        # =========================
-        # DUPLICATE LOCK
-        # =========================
+        print("PROJECT =", repr(project))
+
         with lock:
             if row_id in processed_ids:
-                return jsonify({"status": "skipped"}), 200
+                return jsonify({"status": "skipped", "id": row_id}), 200
 
             processed_ids.add(row_id)
 
-        # =========================
-        # IMAGE LOAD
-        # =========================
         img = download_image(image_url)
 
         if img is None:
+            with lock:
+                processed_ids.discard(row_id)
             return jsonify({"error": "image fail"}), 400
-
-        
-        # =========================
-        # AI PROCESS
-        # =========================
-
-        print("PROJECT =", repr(project))
 
         if project == "outbound":
 
@@ -961,15 +957,13 @@ def predict():
             print("INBOUND:", result_text)
 
         else:
+            with lock:
+                processed_ids.discard(row_id)
 
             return jsonify({
                 "error": f"unknown project: {project}"
             }), 400
-        
 
-        # =========================
-        # UPDATE SHEET
-        # =========================
         update_appsheet(
             row_id,
             result_text
@@ -977,14 +971,14 @@ def predict():
 
         base_url = request.host_url.rstrip("/")
 
-        return jsonify({
-            "status": "success",
-            "project": project,
-            "id": row_id,
-            "volume": result_text,
-            "mode": "empty" if return_empty else "filled",
-            "debug": debug,
-            "debug_urls": {
+        if project == "inbound":
+            debug_urls = {
+                "pallet_mask": f"{base_url}/debug/debug_pallet_mask.jpg",
+                "pallet_box": f"{base_url}/debug/debug_pallet_box.jpg",
+                "list": f"{base_url}/debug-list"
+            }
+        else:
+            debug_urls = {
                 "overlay": f"{base_url}/debug/debug_overlay.jpg",
                 "overlay_light": f"{base_url}/debug/debug_overlay_light.jpg",
                 "overlay_contour": f"{base_url}/debug/debug_overlay_contour.jpg",
@@ -994,12 +988,24 @@ def predict():
                 "blue": f"{base_url}/debug/debug_blue.jpg",
                 "list": f"{base_url}/debug-list"
             }
+
+        return jsonify({
+            "status": "success",
+            "project": project,
+            "id": row_id,
+            "result": result_text,
+            "mode": "empty" if return_empty else "filled",
+            "debug": debug,
+            "debug_urls": debug_urls
         })
 
     except Exception:
+        if row_id:
+            with lock:
+                processed_ids.discard(row_id)
+
         print(traceback.format_exc())
         return jsonify({"error": "server error"}), 500
-
 
 # =========================
 # RUN SERVER
