@@ -106,7 +106,7 @@ def clean_mask(mask, min_area_ratio=0.002):
 # =========================
 # BALANCED VOLUME MODEL
 # =========================
-def _volume(img, debug=True, return_empty=False):
+def gen_volume(img, debug=True, return_empty=False):
 
     if img is None or img.size == 0:
         return 0
