@@ -934,7 +934,7 @@ def predict():
         # =========================
         # AI PROCESS
         # =========================
-
+        
         if project.lower() == "outbound":
 
             volume = gen_volume(
@@ -960,9 +960,10 @@ def predict():
 
         else:
 
-        return jsonify({
+            return jsonify({
                 "error": f"unknown project: {project}"
-                }), 400
+            }), 400
+        
 
         # =========================
         # UPDATE SHEET
