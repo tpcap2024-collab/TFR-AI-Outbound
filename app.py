@@ -898,9 +898,7 @@ def predict():
 
     try:
         data = request.get_json(silent=True)
-            print("=" * 50)
-            print("REQUEST JSON =", data)
-            print("=" * 50)
+
         if not data:
             return jsonify({"error": "no json"}), 400
 
