@@ -935,7 +935,13 @@ def predict():
         # AI PROCESS
         # =========================
         
-        if project.lower() == "outbound":
+        # =========================
+        # AI PROCESS
+        # =========================
+
+        print("PROJECT =", repr(project))
+
+        if project == "outbound":
 
             volume = gen_volume(
                 img,
@@ -947,7 +953,7 @@ def predict():
 
             print("OUTBOUND:", result_text)
 
-        elif project.lower() == "inbound":
+        elif project == "inbound":
 
             pallet_count = gen_pallet(
                 img,
