@@ -699,8 +699,7 @@ def _volume(img, debug=True, return_empty=False):
 
 # =========================
 # GEN PALLET (INBOUND)
-# CREAM GRID + GREEN RACK DETECTION
-# DEBUG IMAGE ONLY
+# DYNAMIC PALLET DETECTION + NON-OVERLAP NMS
 # =========================
 def gen_pallet(img, debug=True):
 
@@ -708,23 +707,110 @@ def gen_pallet(img, debug=True):
         return 0
 
     # =========================
-    # LOCAL HELPERS
+    # LOCAL HELPER FUNCTIONS
     # =========================
     def clamp(v, lo, hi):
         return max(lo, min(hi, v))
 
-    def find_line_centers_from_projection(proj, min_spacing, threshold_ratio=0.35):
+    def box_iou(a, b):
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+
+        ax2 = ax + aw
+        ay2 = ay + ah
+        bx2 = bx + bw
+        by2 = by + bh
+
+        ix1 = max(ax, bx)
+        iy1 = max(ay, by)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+
+        iw = max(0, ix2 - ix1)
+        ih = max(0, iy2 - iy1)
+
+        inter = iw * ih
+
+        area_a = aw * ah
+        area_b = bw * bh
+
+        union = area_a + area_b - inter
+
+        if union <= 0:
+            return 0.0
+
+        return inter / float(union)
+
+    def nms_candidates(candidates, iou_threshold=0.25):
         """
-        หา center ของเส้นหลักจาก projection
-        ใช้หาเสา/คานของกรงครีม
+        candidates item:
+        {
+            "box": (x, y, w, h),
+            "score": float,
+            "type": "cream" or "green"
+        }
         """
-        if proj is None or len(proj) == 0:
+        if not candidates:
             return []
 
-        proj = proj.astype(np.float32)
+        candidates = sorted(
+            candidates,
+            key=lambda x: x["score"],
+            reverse=True
+        )
+
+        selected = []
+
+        for cand in candidates:
+            keep = True
+
+            for sel in selected:
+                iou = box_iou(cand["box"], sel["box"])
+
+                if iou > iou_threshold:
+                    keep = False
+                    break
+
+            if keep:
+                selected.append(cand)
+
+        return selected
+
+    def merge_close_lines(lines, min_gap):
+        if not lines:
+            return []
+
+        lines = sorted(lines)
+        merged = []
+        group = [lines[0]]
+
+        for x in lines[1:]:
+            if abs(x - group[-1]) <= min_gap:
+                group.append(x)
+            else:
+                merged.append(int(sum(group) / len(group)))
+                group = [x]
+
+        if group:
+            merged.append(int(sum(group) / len(group)))
+
+        return merged
+
+    def find_projection_lines(mask, axis, min_strength_ratio, min_gap):
+        """
+        axis=0 => vertical lines from column projection
+        axis=1 => horizontal lines from row projection
+        """
+        if axis == 0:
+            proj = np.sum(mask > 0, axis=0).astype(np.float32)
+        else:
+            proj = np.sum(mask > 0, axis=1).astype(np.float32)
+
+        if proj.size == 0:
+            return []
 
         # smooth projection
-        k = 17
+        k = 15
         kernel = np.ones(k, dtype=np.float32) / float(k)
         proj_smooth = np.convolve(proj, kernel, mode="same")
 
@@ -733,108 +819,71 @@ def gen_pallet(img, debug=True):
         if max_val <= 1e-6:
             return []
 
-        threshold = max_val * threshold_ratio
-        high = proj_smooth >= threshold
+        threshold = max_val * min_strength_ratio
 
-        runs = []
-        start = None
+        raw_lines = []
 
-        for i, flag in enumerate(high):
-            if flag and start is None:
+        in_run = False
+        start = 0
+
+        for i, val in enumerate(proj_smooth):
+            if val >= threshold and not in_run:
                 start = i
-            elif not flag and start is not None:
-                runs.append((start, i - 1))
-                start = None
+                in_run = True
+            elif val < threshold and in_run:
+                end = i - 1
 
-        if start is not None:
-            runs.append((start, len(high) - 1))
+                segment = proj_smooth[start:end + 1]
 
-        centers = []
+                if segment.size > 0:
+                    peak = int(np.argmax(segment))
+                    raw_lines.append(start + peak)
 
-        for s, e in runs:
-            if e < s:
-                continue
+                in_run = False
 
-            segment = proj_smooth[s:e + 1]
-            if segment.size == 0:
-                continue
+        if in_run:
+            end = len(proj_smooth) - 1
+            segment = proj_smooth[start:end + 1]
 
-            peak = int(np.argmax(segment))
-            center = s + peak
-            value = float(proj_smooth[center])
+            if segment.size > 0:
+                peak = int(np.argmax(segment))
+                raw_lines.append(start + peak)
 
-            centers.append((center, value))
-
-        # เรียงจากเส้นที่ชัดที่สุดก่อน
-        centers = sorted(
-            centers,
-            key=lambda x: x[1],
-            reverse=True
+        lines = merge_close_lines(
+            raw_lines,
+            min_gap=min_gap
         )
 
-        selected = []
+        return lines
 
-        for center, value in centers:
-            too_close = False
-
-            for old_center in selected:
-                if abs(center - old_center) < min_spacing:
-                    too_close = True
-                    break
-
-            if not too_close:
-                selected.append(center)
-
-        selected = sorted(selected)
-
-        return selected
-
-    def normalize_line_edges(lines, length, edge_ratio=0.10):
-        """
-        เติมเส้นขอบซ้าย/ขวา หรือ บน/ล่าง ถ้าเส้นที่เจอห่างจากขอบมากเกินไป
-        """
-        if lines is None:
-            lines = []
-
+    def add_border_lines(lines, length, max_edge_gap_ratio=0.10):
         lines = list(lines)
 
         if len(lines) == 0:
-            return lines
+            return [0, length - 1]
 
-        if lines[0] > length * edge_ratio:
+        lines = sorted(lines)
+
+        if lines[0] > length * max_edge_gap_ratio:
             lines.insert(0, 0)
 
-        if lines[-1] < length * (1.0 - edge_ratio):
+        if lines[-1] < length * (1.0 - max_edge_gap_ratio):
             lines.append(length - 1)
 
         return sorted(lines)
 
-    def build_cells_from_count(x, y, bw, bh, cols, rows):
-        cells = []
+    def remove_too_close_lines(lines, min_cell_size):
+        if not lines:
+            return []
 
-        if cols <= 0 or rows <= 0:
-            return cells
+        lines = sorted(lines)
+        result = [lines[0]]
 
-        cell_w = bw / float(cols)
-        cell_h = bh / float(rows)
+        for line in lines[1:]:
+            if line - result[-1] >= min_cell_size:
+                result.append(line)
 
-        for r in range(rows):
-            for c in range(cols):
-                cx1 = int(x + c * cell_w)
-                cy1 = int(y + r * cell_h)
-                cx2 = int(x + (c + 1) * cell_w)
-                cy2 = int(y + (r + 1) * cell_h)
-
-                cells.append(
-                    (
-                        cx1,
-                        cy1,
-                        max(1, cx2 - cx1),
-                        max(1, cy2 - cy1)
-                    )
-                )
-
-        return cells
+        return result
 
     # =========================
     # RESIZE
@@ -844,11 +893,11 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # ROI
-    # ตัดท้องฟ้า / หลังคาสูง / ล้อ / พื้นถนนออก
-    # เหลือเฉพาะบริเวณสินค้าในรถ
+    # ตัดท้องฟ้า ล้อ และพื้นถนนออก
+    # เหลือโซนสินค้าบนรถ
     # =========================
-    y1 = int(h * 0.26)
-    y2 = int(h * 0.72)
+    y1 = int(h * 0.23)
+    y2 = int(h * 0.74)
     x1 = int(w * 0.02)
     x2 = int(w * 0.98)
 
@@ -860,7 +909,7 @@ def gen_pallet(img, debug=True):
     rh, rw = roi.shape[:2]
 
     # =========================
-    # NORMALIZE LIGHT
+    # LIGHT NORMALIZATION
     # =========================
     lab = cv2.cvtColor(
         roi,
@@ -892,20 +941,30 @@ def gen_pallet(img, debug=True):
     )
 
     # =========================
-    # CREAM MASK
-    # จับกรง/ครีม/ลังโทนเบจ
-    # ตั้งใจไม่จับท้องฟ้า/กระดาษขาวมากเกินไป
+    # MASK: CREAM / BEIGE / BROWN
+    # สำหรับกรงครีม ลัง กระดาษ ไม้
     # =========================
-    cream_mask = cv2.inRange(
+    cream_mask_1 = cv2.inRange(
         hsv,
-        (7, 22, 55),
-        (42, 185, 245)
+        (5, 18, 55),
+        (45, 200, 255)
     )
 
-    # ลบกระดาษ/label ขาวจัด
+    cream_mask_2 = cv2.inRange(
+        hsv,
+        (0, 0, 95),
+        (50, 105, 245)
+    )
+
+    cream_mask = cv2.bitwise_or(
+        cream_mask_1,
+        cream_mask_2
+    )
+
+    # ลบ label/กระดาษขาวจัด
     white_mask = cv2.inRange(
         hsv,
-        (0, 0, 185),
+        (0, 0, 190),
         (180, 55, 255)
     )
 
@@ -915,7 +974,8 @@ def gen_pallet(img, debug=True):
     )
 
     # =========================
-    # GREEN MASK
+    # MASK: GREEN
+    # สำหรับ rack/pallet เขียว
     # =========================
     green_mask = cv2.inRange(
         hsv,
@@ -931,7 +991,7 @@ def gen_pallet(img, debug=True):
         (3, 3)
     )
 
-    kernel_cream_close = cv2.getStructuringElement(
+    kernel_mid = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (7, 7)
     )
@@ -946,27 +1006,14 @@ def gen_pallet(img, debug=True):
     cream_clean = cv2.morphologyEx(
         cream_clean,
         cv2.MORPH_CLOSE,
-        kernel_cream_close,
+        kernel_mid,
         iterations=1
-    )
-
-    # ใช้รวม block กรงครีมให้เป็นก้อนใหญ่
-    kernel_block = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (45, 17)
-    )
-
-    cream_block_mask = cv2.morphologyEx(
-        cream_clean,
-        cv2.MORPH_CLOSE,
-        kernel_block,
-        iterations=3
     )
 
     green_clean = cv2.morphologyEx(
         green_mask,
         cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11)),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)),
         iterations=2
     )
 
@@ -978,265 +1025,219 @@ def gen_pallet(img, debug=True):
     )
 
     # =========================
-    # FIND MAIN CREAM BLOCK
+    # EDGE / LINE MASK
+    # ใช้ช่วยหาโครงกรง ไม่ใช่นับตู้ใหญ่
     # =========================
-    contours, _ = cv2.findContours(
-        cream_block_mask,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
+    gray_blur = cv2.GaussianBlur(
+        gray,
+        (5, 5),
+        0
     )
 
-    main_box = None
-    best_score = 0
+    edges = cv2.Canny(
+        gray_blur,
+        45,
+        135
+    )
 
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
+    combined_for_lines = cv2.bitwise_or(
+        cream_clean,
+        green_clean
+    )
 
-        if area < rh * rw * 0.025:
-            continue
+    combined_for_lines = cv2.bitwise_or(
+        combined_for_lines,
+        edges
+    )
 
-        x, y, bw, bh = cv2.boundingRect(cnt)
+    # ตัดขอบบน/ล่างที่มักเป็นหลังคาและคานรถ
+    top_cut = int(rh * 0.05)
+    bottom_cut = int(rh * 0.04)
 
-        if bw <= 0 or bh <= 0:
-            continue
-
-        aspect = bw / float(bh)
-
-        # กรงครีมหลักควรกว้าง มีหลายช่อง และอยู่ช่วงกลาง/ขวาของรถ
-        possible = (
-            bw >= rw * 0.38 and
-            bh >= rh * 0.42 and
-            1.4 <= aspect <= 5.5 and
-            x + bw >= rw * 0.45
-        )
-
-        if not possible:
-            continue
-
-        score = area + (bw * bh * 0.25)
-
-        if score > best_score:
-            best_score = score
-            main_box = (x, y, bw, bh)
-
-    cream_count = 0
-    green_count = 0
-
-    debug_box = roi.copy()
-    debug_overlay = roi.copy()
-    debug_contour = roi.copy()
-
-    v_lines = []
-    h_lines = []
-    cream_cells = []
+    combined_for_lines[:top_cut, :] = 0
+    combined_for_lines[rh - bottom_cut:, :] = 0
 
     # =========================
-    # COUNT CREAM BY GRID
+    # FIND DYNAMIC GRID LINES
     # =========================
-    if main_box is not None:
+    vertical_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (3, max(25, int(rh * 0.18)))
+    )
 
-        bx, by, bw, bh = main_box
+    horizontal_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(35, int(rw * 0.08)), 3)
+    )
 
-        # ขยาย box ให้ครอบกรอบนอกของกรง
-        pad_x = int(bw * 0.02)
-        pad_y = int(bh * 0.04)
+    vertical_line_mask = cv2.morphologyEx(
+        combined_for_lines,
+        cv2.MORPH_OPEN,
+        vertical_kernel,
+        iterations=1
+    )
 
-        bx = clamp(bx - pad_x, 0, rw - 1)
-        by = clamp(by - pad_y, 0, rh - 1)
-        bw = clamp(bw + pad_x * 2, 1, rw - bx)
-        bh = clamp(bh + pad_y * 2, 1, rh - by)
+    horizontal_line_mask = cv2.morphologyEx(
+        combined_for_lines,
+        cv2.MORPH_OPEN,
+        horizontal_kernel,
+        iterations=1
+    )
 
-        crop_cream = cream_clean[by:by + bh, bx:bx + bw]
-        crop_gray = gray[by:by + bh, bx:bx + bw]
+    v_lines = find_projection_lines(
+        vertical_line_mask,
+        axis=0,
+        min_strength_ratio=0.25,
+        min_gap=max(12, int(rw * 0.025))
+    )
 
-        # =========================
-        # หาเส้นตั้ง/นอนของกรง
-        # =========================
-        vertical_kernel_h = max(25, int(bh * 0.20))
-        horizontal_kernel_w = max(35, int(bw * 0.12))
+    h_lines = find_projection_lines(
+        horizontal_line_mask,
+        axis=1,
+        min_strength_ratio=0.25,
+        min_gap=max(10, int(rh * 0.035))
+    )
 
-        vertical_kernel = cv2.getStructuringElement(
-            cv2.MORPH_RECT,
-            (3, vertical_kernel_h)
-        )
+    # เพิ่มขอบภาพเฉพาะถ้าจำเป็น
+    v_lines = add_border_lines(
+        v_lines,
+        rw,
+        max_edge_gap_ratio=0.08
+    )
 
-        horizontal_kernel = cv2.getStructuringElement(
-            cv2.MORPH_RECT,
-            (horizontal_kernel_w, 3)
-        )
+    h_lines = add_border_lines(
+        h_lines,
+        rh,
+        max_edge_gap_ratio=0.10
+    )
 
-        vertical_lines_mask = cv2.morphologyEx(
-            crop_cream,
-            cv2.MORPH_OPEN,
-            vertical_kernel,
-            iterations=1
-        )
+    # กรองเส้นที่ใกล้กันเกินไป เพื่อไม่ให้ cell เล็กผิดปกติ
+    min_cell_w = int(rw * 0.075)
+    min_cell_h = int(rh * 0.120)
 
-        horizontal_lines_mask = cv2.morphologyEx(
-            crop_cream,
-            cv2.MORPH_OPEN,
-            horizontal_kernel,
-            iterations=1
-        )
+    v_lines = remove_too_close_lines(
+        v_lines,
+        min_cell_w
+    )
 
-        edges = cv2.Canny(
-            crop_gray,
-            50,
-            140
-        )
+    h_lines = remove_too_close_lines(
+        h_lines,
+        min_cell_h
+    )
 
-        vertical_proj = (
-            np.sum(vertical_lines_mask > 0, axis=0).astype(np.float32) +
-            np.sum(edges > 0, axis=0).astype(np.float32) * 0.20
-        )
+    # =========================
+    # CREATE CELL CANDIDATES FROM GRID
+    # =========================
+    candidates = []
+    rejected_boxes = []
 
-        horizontal_proj = (
-            np.sum(horizontal_lines_mask > 0, axis=1).astype(np.float32) +
-            np.sum(edges > 0, axis=1).astype(np.float32) * 0.20
-        )
+    combined_mask = cv2.bitwise_or(
+        cream_clean,
+        green_clean
+    )
 
-        min_v_spacing = max(30, int(bw * 0.12))
-        min_h_spacing = max(30, int(bh * 0.20))
+    for yi in range(len(h_lines) - 1):
+        for xi in range(len(v_lines) - 1):
 
-        v_lines = find_line_centers_from_projection(
-            vertical_proj,
-            min_spacing=min_v_spacing,
-            threshold_ratio=0.28
-        )
+            cx1 = int(v_lines[xi])
+            cx2 = int(v_lines[xi + 1])
+            cy1 = int(h_lines[yi])
+            cy2 = int(h_lines[yi + 1])
 
-        h_lines = find_line_centers_from_projection(
-            horizontal_proj,
-            min_spacing=min_h_spacing,
-            threshold_ratio=0.28
-        )
+            cw = cx2 - cx1
+            ch = cy2 - cy1
 
-        v_lines = normalize_line_edges(
-            v_lines,
-            bw,
-            edge_ratio=0.10
-        )
+            if cw <= 0 or ch <= 0:
+                continue
 
-        h_lines = normalize_line_edges(
-            h_lines,
-            bh,
-            edge_ratio=0.12
-        )
+            cell_area = float(cw * ch)
 
-        # =========================
-        # คำนวณจำนวน column/row
-        # =========================
-        col_count = max(0, len(v_lines) - 1)
-        row_count = max(0, len(h_lines) - 1)
-
-        block_aspect = bw / float(bh)
-
-        # =========================
-        # FALLBACK / STABILIZER
-        # สำหรับ pattern ตามภาพตัวอย่าง: กรงครีม 5 คอลัมน์ x 3 แถว
-        # ถ้า line detection เพี้ยน ให้ใช้สัดส่วน block ช่วย lock ค่า
-        # =========================
-        if bh >= rh * 0.45 and 2.0 <= block_aspect <= 3.8:
-            if row_count < 2 or row_count > 4:
-                row_count = 3
-
-            if col_count < 4 or col_count > 6:
-                col_count = 5
-
-            # ถ้าได้ใกล้เคียงอยู่แล้ว ให้ดึงเข้าหา 5x3
-            if row_count in [2, 3, 4]:
-                row_count = 3
-
-            if col_count in [4, 5, 6]:
-                col_count = 5
-
-        else:
-            # fallback ทั่วไป
-            if row_count <= 0:
-                row_count = 1
-
-            if col_count <= 0:
-                estimated_cols = int(round(block_aspect * row_count / 1.15))
-                col_count = clamp(estimated_cols, 1, 8)
-
-        col_count = clamp(col_count, 1, 8)
-        row_count = clamp(row_count, 1, 5)
-
-        cream_count = int(col_count * row_count)
-
-        cream_cells = build_cells_from_count(
-            bx,
-            by,
-            bw,
-            bh,
-            col_count,
-            row_count
-        )
-
-        # =========================
-        # DEBUG DRAW CREAM GRID
-        # =========================
-        cv2.rectangle(
-            debug_box,
-            (bx, by),
-            (bx + bw, by + bh),
-            (0, 255, 255),
-            3
-        )
-
-        cv2.putText(
-            debug_box,
-            f"CREAM {col_count}x{row_count}={cream_count}",
-            (bx, max(25, by - 10)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (0, 255, 255),
-            2,
-            cv2.LINE_AA
-        )
-
-        for i, cell in enumerate(cream_cells, start=1):
-            cx, cy, cw, ch = cell
-
-            cv2.rectangle(
-                debug_box,
-                (cx, cy),
-                (cx + cw, cy + ch),
-                (0, 255, 0),
-                2
+            # =========================
+            # SIZE FILTER
+            # ขนาด cell ต้องใกล้เคียง pallet/cage
+            # =========================
+            too_small = (
+                cw < rw * 0.075 or
+                ch < rh * 0.120 or
+                cell_area < rh * rw * 0.006
             )
 
-            cv2.putText(
-                debug_box,
-                str(i),
-                (cx + 6, cy + 24),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.60,
-                (0, 255, 0),
-                2,
-                cv2.LINE_AA
+            too_big = (
+                cw > rw * 0.260 or
+                ch > rh * 0.420 or
+                cell_area > rh * rw * 0.100
             )
 
-        # วาดเส้นที่ตรวจจับได้จริงบน debug_contour
-        for vx in v_lines:
-            cv2.line(
-                debug_contour,
-                (bx + int(vx), by),
-                (bx + int(vx), by + bh),
-                (0, 255, 255),
-                2
+            aspect = cw / float(ch)
+
+            bad_aspect = (
+                aspect < 0.45 or
+                aspect > 2.80
             )
 
-        for hy in h_lines:
-            cv2.line(
-                debug_contour,
-                (bx, by + int(hy)),
-                (bx + bw, by + int(hy)),
-                (0, 255, 255),
-                2
+            if too_small or too_big or bad_aspect:
+                rejected_boxes.append(
+                    {
+                        "box": (cx1, cy1, cw, ch),
+                        "reason": "SIZE"
+                    }
+                )
+                continue
+
+            cell_cream = cream_clean[cy1:cy2, cx1:cx2]
+            cell_green = green_clean[cy1:cy2, cx1:cx2]
+            cell_combined = combined_mask[cy1:cy2, cx1:cx2]
+            cell_edges = edges[cy1:cy2, cx1:cx2]
+
+            cream_pixels = cv2.countNonZero(cell_cream)
+            green_pixels = cv2.countNonZero(cell_green)
+            combined_pixels = cv2.countNonZero(cell_combined)
+            edge_pixels = cv2.countNonZero(cell_edges)
+
+            cream_ratio = cream_pixels / max(1.0, cell_area)
+            green_ratio = green_pixels / max(1.0, cell_area)
+            combined_ratio = combined_pixels / max(1.0, cell_area)
+            edge_ratio = edge_pixels / max(1.0, cell_area)
+
+            # =========================
+            # OCCUPANCY CHECK
+            # พาเลท/กรงตาข่ายมี pixel ไม่เต็มช่อง จึงใช้ threshold ต่ำ
+            # =========================
+            has_cream = cream_ratio >= 0.012
+            has_green = green_ratio >= 0.018
+            has_structure = edge_ratio >= 0.018
+            has_content = combined_ratio >= 0.018
+
+            if not ((has_cream or has_green) and (has_structure or has_content)):
+                rejected_boxes.append(
+                    {
+                        "box": (cx1, cy1, cw, ch),
+                        "reason": "EMPTY"
+                    }
+                )
+                continue
+
+            score = (
+                cream_ratio * 80.0 +
+                green_ratio * 120.0 +
+                edge_ratio * 30.0 +
+                combined_ratio * 60.0
+            )
+
+            pallet_type = "green" if green_ratio > cream_ratio * 1.25 else "cream"
+
+            candidates.append(
+                {
+                    "box": (cx1, cy1, cw, ch),
+                    "score": score,
+                    "type": pallet_type,
+                    "source": "grid"
+                }
             )
 
     # =========================
-    # COUNT GREEN RACK OUTSIDE CREAM BLOCK
+    # GREEN CONTOUR CANDIDATES
+    # สำหรับ rack เขียวที่ไม่เข้ากับ grid
     # =========================
     green_contours, _ = cv2.findContours(
         green_clean,
@@ -1245,9 +1246,10 @@ def gen_pallet(img, debug=True):
     )
 
     for cnt in green_contours:
+
         area = cv2.contourArea(cnt)
 
-        if area < rh * rw * 0.004:
+        if area < rh * rw * 0.0025:
             continue
 
         x, y, gw, gh = cv2.boundingRect(cnt)
@@ -1258,65 +1260,153 @@ def gen_pallet(img, debug=True):
         aspect = gw / float(gh)
 
         passed_size = (
-            gw >= rw * 0.08 and
-            gh >= rh * 0.18 and
-            area >= rh * rw * 0.004
+            gw >= rw * 0.060 and
+            gh >= rh * 0.100 and
+            area >= rh * rw * 0.0025
+        )
+
+        passed_max = (
+            gw <= rw * 0.300 and
+            gh <= rh * 0.500 and
+            area <= rh * rw * 0.120
         )
 
         passed_aspect = (
-            0.35 <= aspect <= 4.5
+            0.35 <= aspect <= 4.00
         )
 
-        if not passed_size or not passed_aspect:
-            continue
+        # กันเส้นยาวด้านล่างรถ
+        not_bottom_bar = y < rh * 0.78
 
-        # ไม่ให้นับสีเขียวที่อยู่ภายในกรงครีม
-        inside_main_block = False
+        if passed_size and passed_max and passed_aspect and not_bottom_bar:
+            score = float(area) / float(rh * rw) * 1000.0
 
-        if main_box is not None:
-            bx, by, bw, bh = main_box
-
-            gx_center = x + gw / 2.0
-            gy_center = y + gh / 2.0
-
-            inside_main_block = (
-                bx <= gx_center <= bx + bw and
-                by <= gy_center <= by + bh
+            candidates.append(
+                {
+                    "box": (x, y, gw, gh),
+                    "score": score + 20.0,
+                    "type": "green",
+                    "source": "contour"
+                }
+            )
+        else:
+            rejected_boxes.append(
+                {
+                    "box": (x, y, gw, gh),
+                    "reason": "GREEN_REJECT"
+                }
             )
 
-        if inside_main_block:
+    # =========================
+    # CREAM CONTOUR CANDIDATES
+    # สำหรับพาเลทครีมที่ grid line หาไม่ครบ
+    # =========================
+    cream_block = cv2.morphologyEx(
+        cream_clean,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (13, 9)),
+        iterations=1
+    )
+
+    cream_contours, _ = cv2.findContours(
+        cream_block,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    for cnt in cream_contours:
+
+        area = cv2.contourArea(cnt)
+
+        if area < rh * rw * 0.003:
             continue
 
-        # กันการจับเส้นขอบรถล่าง
-        if y > rh * 0.78:
+        x, y, cw, ch = cv2.boundingRect(cnt)
+
+        if cw <= 0 or ch <= 0:
             continue
 
-        green_count += 1
+        aspect = cw / float(ch)
 
-        cv2.rectangle(
-            debug_box,
-            (x, y),
-            (x + gw, y + gh),
-            (255, 255, 0),
-            3
+        passed_size = (
+            cw >= rw * 0.070 and
+            ch >= rh * 0.100 and
+            area >= rh * rw * 0.003
         )
 
-        cv2.putText(
-            debug_box,
-            f"GREEN {green_count}",
-            (x, max(25, y - 8)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (255, 255, 0),
-            2,
-            cv2.LINE_AA
+        passed_max = (
+            cw <= rw * 0.260 and
+            ch <= rh * 0.420 and
+            area <= rh * rw * 0.090
         )
 
-    total_count = int(cream_count + green_count)
+        passed_aspect = (
+            0.45 <= aspect <= 3.00
+        )
+
+        if passed_size and passed_max and passed_aspect:
+            score = float(area) / float(rh * rw) * 800.0
+
+            candidates.append(
+                {
+                    "box": (x, y, cw, ch),
+                    "score": score,
+                    "type": "cream",
+                    "source": "contour"
+                }
+            )
 
     # =========================
-    # OVERLAY
+    # NON-OVERLAP NMS
+    # ตัดกรอบซ้อนทับกัน ไม่ให้นับซ้ำ
     # =========================
+    selected = nms_candidates(
+        candidates,
+        iou_threshold=0.22
+    )
+
+    # =========================
+    # FINAL SANITY FILTER
+    # กันกรอบที่แทบซ้อนกันแต่ IoU ต่ำจากการเหลื่อมขอบ
+    # =========================
+    final_selected = []
+
+    for cand in selected:
+        x, y, bw, bh = cand["box"]
+
+        cx = x + bw / 2.0
+        cy = y + bh / 2.0
+
+        duplicate = False
+
+        for old in final_selected:
+            ox, oy, ow, oh = old["box"]
+
+            ocx = ox + ow / 2.0
+            ocy = oy + oh / 2.0
+
+            center_close = (
+                abs(cx - ocx) < min(bw, ow) * 0.55 and
+                abs(cy - ocy) < min(bh, oh) * 0.55
+            )
+
+            if center_close:
+                duplicate = True
+                break
+
+        if not duplicate:
+            final_selected.append(cand)
+
+    selected = final_selected
+
+    pallet_count = len(selected)
+
+    # =========================
+    # DEBUG DRAW
+    # =========================
+    debug_box = roi.copy()
+    debug_contour = roi.copy()
+
     color_layer = roi.copy()
 
     color_layer[cream_clean > 0] = (
@@ -1339,9 +1429,91 @@ def gen_pallet(img, debug=True):
         0
     )
 
+    # วาดเส้น grid ที่ระบบหาได้
+    for vx in v_lines:
+        cv2.line(
+            debug_contour,
+            (int(vx), 0),
+            (int(vx), rh),
+            (0, 255, 255),
+            1
+        )
+
+    for hy in h_lines:
+        cv2.line(
+            debug_contour,
+            (0, int(hy)),
+            (rw, int(hy)),
+            (0, 255, 255),
+            1
+        )
+
+    # วาด rejected บางส่วนแบบจาง ๆ ไม่ให้รกเกิน
+    max_reject_draw = 40
+
+    for item in rejected_boxes[:max_reject_draw]:
+        x, y, bw, bh = item["box"]
+
+        cv2.rectangle(
+            debug_box,
+            (x, y),
+            (x + bw, y + bh),
+            (0, 0, 120),
+            1
+        )
+
+    # วาดกล่องที่นับจริง
+    cream_count = 0
+    green_count = 0
+
+    for idx, cand in enumerate(selected, start=1):
+
+        x, y, bw, bh = cand["box"]
+        pallet_type = cand["type"]
+        source = cand["source"]
+
+        if pallet_type == "green":
+            green_count += 1
+            color = (255, 255, 0)
+            label = f"G{green_count}"
+        else:
+            cream_count += 1
+            color = (0, 255, 0)
+            label = f"C{cream_count}"
+
+        cv2.rectangle(
+            debug_box,
+            (x, y),
+            (x + bw, y + bh),
+            color,
+            3
+        )
+
+        cv2.putText(
+            debug_box,
+            label,
+            (x + 6, max(24, y + 24)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.70,
+            color,
+            2,
+            cv2.LINE_AA
+        )
+
+        cv2.putText(
+            debug_box,
+            source,
+            (x + 6, min(rh - 6, y + bh - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            color,
+            1,
+            cv2.LINE_AA
+        )
+
     cv2.putText(
         debug_box,
-        f"CREAM={cream_count} GREEN={green_count} TOTAL={total_count}",
+        f"CREAM={cream_count} GREEN={green_count} TOTAL={pallet_count}",
         (20, 35),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.90,
@@ -1351,18 +1523,19 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("INBOUND PALLET DEBUG")
+    print("INBOUND PALLET DYNAMIC DEBUG")
     print(f"ROI SIZE: {rw}x{rh}")
-    print(f"MAIN CREAM BOX: {main_box}")
-    print(f"V LINES: {v_lines}")
-    print(f"H LINES: {h_lines}")
+    print(f"V_LINES: {v_lines}")
+    print(f"H_LINES: {h_lines}")
+    print(f"CANDIDATES: {len(candidates)}")
+    print(f"SELECTED/NMS: {len(selected)}")
     print(f"CREAM COUNT: {cream_count}")
     print(f"GREEN COUNT: {green_count}")
-    print(f"PALLET COUNT: {total_count}")
+    print(f"PALLET COUNT: {pallet_count}")
     print("=" * 50)
 
     # =========================
-    # DEBUG OUTPUT
+    # SAVE DEBUG
     # ใช้ชื่อไฟล์เดิม ไม่ต้องแก้ route อื่น
     # =========================
     if debug:
@@ -1389,20 +1562,21 @@ def gen_pallet(img, debug=True):
             green_clean
         )
 
-        # main cream block mask
+        # line mask
         save_debug(
             "debug_container.jpg",
-            cream_block_mask
+            combined_for_lines
         )
 
-        combined_mask = cv2.bitwise_or(
+        # combined mask
+        final_mask = cv2.bitwise_or(
             cream_clean,
             green_clean
         )
 
         save_debug(
             "debug_cargo.jpg",
-            combined_mask
+            final_mask
         )
 
         save_debug(
@@ -1416,17 +1590,15 @@ def gen_pallet(img, debug=True):
         )
 
         # ภาพผลลัพธ์หลัก
-        # เขียว = ช่องครีมที่นับ
-        # ฟ้า/เหลือง = green rack ที่นับ
         save_debug(
             "debug_empty.jpg",
             debug_box
         )
 
-        # เผื่อเปิดชื่อเดิมของ inbound
+        # ชื่อเดิมของ inbound
         save_debug(
             "debug_pallet_mask.jpg",
-            combined_mask
+            final_mask
         )
 
         save_debug(
@@ -1434,7 +1606,7 @@ def gen_pallet(img, debug=True):
             debug_box
         )
 
-    return total_count
+    return pallet_count
 
     
 # =========================
