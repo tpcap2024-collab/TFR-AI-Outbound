@@ -949,23 +949,20 @@ def predict():
 
         elif project.lower() == "inbound":
 
-            counts, details = gen_pallet_count(
-            img,
-            debug=debug
+            pallet_count = gen_pallet(
+                img,
+                debug=debug
             )
 
-            result_text = (
-                f"Total={counts['total']} | "
-                f"Green={counts['green_pallet']} | "
-                f"Cream={counts['cream_pallet']} | "
-                f"Blue={counts['blue_pallet']} | "
-                f"Carton={counts['carton']} | "
-                f"SleeveBlack={counts['sleeve_black']} | "
-                f"SleeveWhite={counts['sleeve_white']} | "
-                f"Unknown={counts['unknown']}"
-            )
+            result_text = str(pallet_count)
 
-    print("INBOUND:", result_text)
+            print("INBOUND:", result_text)
+
+        else:
+
+        return jsonify({
+                "error": f"unknown project: {project}"
+                }), 400
         else:
 
             return jsonify({
