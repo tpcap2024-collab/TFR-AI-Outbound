@@ -102,9 +102,7 @@ def clean_mask(mask, min_area_ratio=0.002):
     return result
 
 
-# =========================
-# BALANCED VOLUME MODEL
-# =========================
+
 # =========================
 # BALANCED VOLUME MODEL
 # =========================
@@ -951,11 +949,23 @@ def predict():
 
         elif project.lower() == "inbound":
 
-            # Placeholder รอระบบนับพาเลท
-            result_text = "0"
+            counts, details = gen_pallet_count(
+            img,
+            debug=debug
+            )
 
-            print("INBOUND:", result_text)
+            result_text = (
+                f"Total={counts['total']} | "
+                f"Green={counts['green_pallet']} | "
+                f"Cream={counts['cream_pallet']} | "
+                f"Blue={counts['blue_pallet']} | "
+                f"Carton={counts['carton']} | "
+                f"SleeveBlack={counts['sleeve_black']} | "
+                f"SleeveWhite={counts['sleeve_white']} | "
+                f"Unknown={counts['unknown']}"
+            )
 
+    print("INBOUND:", result_text)
         else:
 
             return jsonify({
