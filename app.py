@@ -103,35 +103,30 @@ def gen_pallet(img, debug=True):
         int(W*0.02):int(W*0.98)
     ]
 
-    rh, rw = roi.shape[:2]
+    rh,rw = roi.shape[:2]
 
     hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
     # =========================
-    # GREEN MASK (detect rack structure)
+    # GREEN MASK
     # =========================
-    green_mask = cv2.inRange(hsv, (30,30,30), (90,255,255))
+    green_mask = cv2.inRange(hsv,(30,30,30),(90,255,255))
 
-    green_mask = cv2.morphologyEx(
-        green_mask,
-        cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_RECT,(5,5)),
-        1
-    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(5,5))
+    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN, kernel, 1)
 
     # =========================
-    # EDGE (ช่วยให้ contiguity ดีขึ้น)
+    # EDGE (ช่วย structure)
     # =========================
     edges = cv2.Canny(gray, 50, 150)
-
-    combined = cv2.bitwise_or(green_mask, edges)
+    combine = cv2.bitwise_or(green_mask, edges)
 
     # =========================
-    # STEP 1: หา raw blocks จาก contour
+    # STEP 1: หา raw blocks
     # =========================
-    contours, _ = cv2.findContours(
-        combined,
+    contours,_ = cv2.findContours(
+        combine,
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
@@ -141,112 +136,107 @@ def gen_pallet(img, debug=True):
     for c in contours:
         x,y,w,h = cv2.boundingRect(c)
 
-        # กรอง noise เล็ก
         if w*h < rw*rh*0.01:
             continue
 
-        # กรองเสาแคบ
+        # กันเสา
         if w < rw*0.04:
             continue
 
         raw_blocks.append((x,y,x+w,y+h))
 
     # =========================
-    # STEP 2: MERGE BLOCK (สำคัญ)
+    # ✅ STEP 2: MERGE "เฉพาะแนวตั้ง"
     # =========================
-    def merge_blocks(blocks, dist_x=60, dist_y=60):
+    def merge_vertical(blocks, y_dist=60):
 
         merged = []
 
-        for box in blocks:
-            x1,y1,x2,y2 = box
+        for (x1,y1,x2,y2) in blocks:
 
             merged_flag = False
 
             for i,(mx1,my1,mx2,my2) in enumerate(merged):
 
-                # overlap หรือใกล้
-                if not (x2 < mx1-dist_x or x1 > mx2+dist_x or
-                        y2 < my1-dist_y or y1 > my2+dist_y):
+                # ✅ ต้อง overlap X (ห้าม merge ข้ามช่อง)
+                overlap_x = not (x2 < mx1 or x1 > mx2)
 
-                    nx1 = min(x1, mx1)
-                    ny1 = min(y1, my1)
-                    nx2 = max(x2, mx2)
-                    ny2 = max(y2, my2)
+                # ✅ ใกล้กันแนว Y
+                close_y = abs(y1-my2) < y_dist or abs(y2-my1) < y_dist
+
+                if overlap_x and close_y:
+                    nx1 = min(x1,mx1)
+                    ny1 = min(y1,my1)
+                    nx2 = max(x2,mx2)
+                    ny2 = max(y2,my2)
 
                     merged[i] = (nx1,ny1,nx2,ny2)
                     merged_flag = True
                     break
 
             if not merged_flag:
-                merged.append(box)
+                merged.append((x1,y1,x2,y2))
 
         return merged
 
-    merged_blocks = merge_blocks(raw_blocks, dist_x=80, dist_y=80)
+    merged_blocks = merge_vertical(raw_blocks)
 
     debug_img = roi.copy()
 
     # =========================
-    # STEP 3: FILTER PALLET จริง
+    # ✅ STEP 3: FINAL FILTER (ตัดกล่องใหญ่เกิน + noise)
     # =========================
     pallet_count = 0
 
     for (x1,y1,x2,y2) in merged_blocks:
 
-        width  = x2 - x1
-        height = y2 - y1
+        w = x2-x1
+        h = y2-y1
 
-        # ✅ filter ช่องว่าง
+        # ✅ ตัด block ใหญ่เกิน (กันทั้งภาพ)
+        if w > rw * 0.35:
+            continue
+
+        # ✅ กัน noise
+        if w < rw * 0.10:
+            continue
+
+        if h < rh * 0.15:
+            continue
+
+        # ✅ ต้องมี green จริง
         sub = green_mask[y1:y2, x1:x2]
-        density = np.sum(sub > 0) / (sub.size + 1e-6)
+        density = np.sum(sub>0)/(sub.size+1e-6)
 
         if density < 0.05:
             continue
 
-        # ✅ filter เสา / noise
-        if width < rw*0.10:
-            continue
-
-        if height < rh*0.15:
-            continue
-
         pallet_count += 1
 
-        # 🔴 RED BOX (pallet จริง)
-        cv2.rectangle(
-            debug_img,
-            (x1,y1),
-            (x2,y2),
-            (0,0,255),   # RED
-            3
-        )
+        # ✅ RED BOX = pallet จริง
+        cv2.rectangle(debug_img,(x1,y1),(x2,y2),(0,0,255),3)
 
-        cv2.putText(
-            debug_img,
-            f"P{pallet_count}",
-            (x1+5,y1+30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0,0,255),
-            2
-        )
+        cv2.putText(debug_img,
+                    f"P{pallet_count}",
+                    (x1+5,y1+30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0,0,255),
+                    2)
 
     # =========================
     # RESULT
     # =========================
-    cv2.putText(
-        debug_img,
-        f"PALLET={pallet_count}",
-        (20,40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1,
-        (0,255,255),
-        3
-    )
+    cv2.putText(debug_img,
+                f"PALLET={pallet_count}",
+                (20,40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0,255,255),
+                3)
 
     print("="*50)
-    print("RED PALLET RESULT =", pallet_count)
+    print("FINAL PALLET =", pallet_count)
     print("="*50)
 
     if debug:
