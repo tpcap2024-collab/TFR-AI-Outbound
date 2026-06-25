@@ -98,6 +98,7 @@ def gen_pallet(img, debug=True):
     img = cv2.resize(img, (1280, 720))
     H, W = img.shape[:2]
 
+    # ROI เฉพาะตัวรถ
     roi = img[
         int(H * 0.15):int(H * 0.85),
         int(W * 0.02):int(W * 0.98)
@@ -109,306 +110,293 @@ def gen_pallet(img, debug=True):
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
     # =========================
-    # GREEN MASK (rack structure)
+    # GREEN MASK
     # =========================
     green_mask = cv2.inRange(
         hsv,
-        (30, 35, 35),
+        (30, 30, 30),
         (90, 255, 255)
     )
 
-    # =========================
-    # CUT NON-CARGO AREA
-    # สำคัญมาก: กันล้อ/คานล่าง/พื้นรถ
-    # =========================
+    # ตัดส่วนหลังคา/ล้อ/คานล่าง
     top_cut = int(rh * 0.06)
-    bottom_cut = int(rh * 0.78)   # ตัดใต้พื้นรถทิ้ง
+    bottom_cut = int(rh * 0.78)
 
     green_mask[:top_cut, :] = 0
     green_mask[bottom_cut:, :] = 0
 
-    # ขอบซ้าย/ขวานิดหน่อยกันเส้นกรอบรถ
-    green_mask[:, :int(rw * 0.01)] = 0
-    green_mask[:, int(rw * 0.99):] = 0
-
     # =========================
-    # CLEAN MASK
+    # CLEAN
     # =========================
-    kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    kernel_mid   = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    k3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    k5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
 
     green_mask = cv2.morphologyEx(
         green_mask,
         cv2.MORPH_OPEN,
-        kernel_small,
+        k3,
         iterations=1
     )
 
     green_mask = cv2.morphologyEx(
         green_mask,
         cv2.MORPH_CLOSE,
-        kernel_mid,
+        k5,
         iterations=1
     )
 
-    # =========================
-    # EDGE (ใช้ช่วย split เท่านั้น)
-    # =========================
+    # edge ใช้ช่วยหาแนวแบ่ง ไม่ใช้เป็นตัวนับหลัก
     edges = cv2.Canny(
         cv2.GaussianBlur(gray, (5, 5), 0),
         50,
         150
     )
-
     edges[:top_cut, :] = 0
     edges[bottom_cut:, :] = 0
 
-    # combine สำหรับ "หาแนวแบ่ง"
     split_map = cv2.bitwise_or(green_mask, edges)
 
     debug_img = roi.copy()
+    debug_grid = roi.copy()
 
     # =========================
-    # STEP 1: SPLIT X
+    # หา bounding area ของ cargo จริงก่อน
     # =========================
-    col_sum = np.sum(split_map > 0, axis=0).astype(np.float32)
+    ys, xs = np.where(green_mask > 0)
 
-    if np.max(col_sum) <= 0:
+    if xs.size == 0 or ys.size == 0:
         if debug:
             save_debug("debug_green_mask.jpg", green_mask)
             save_debug("debug_edges.jpg", edges)
             save_debug("debug_pallet_box.jpg", debug_img)
         return 0
 
-    col_th = np.max(col_sum) * 0.35
+    x_min = int(xs.min())
+    x_max = int(xs.max())
+    y_min = int(ys.min())
+    y_max = int(ys.max())
 
-    x_blocks = []
-    in_block = False
+    # padding นิดหน่อย
+    pad_x = int((x_max - x_min) * 0.02)
+    pad_y = int((y_max - y_min) * 0.03)
 
-    for i in range(len(col_sum)):
-        if col_sum[i] > col_th and not in_block:
-            start = i
-            in_block = True
+    x_min = max(0, x_min - pad_x)
+    x_max = min(rw - 1, x_max + pad_x)
+    y_min = max(0, y_min - pad_y)
+    y_max = min(rh - 1, y_max + pad_y)
 
-        elif col_sum[i] <= col_th and in_block:
-            end = i
-            width = end - start
+    work_mask = split_map[y_min:y_max, x_min:x_max]
+    work_green = green_mask[y_min:y_max, x_min:x_max]
 
-            # split block ใหญ่เกิน
-            if width > rw * 0.24:
-                mid = (start + end) // 2
-                x_blocks.append((start, mid))
-                x_blocks.append((mid, end))
-            else:
-                x_blocks.append((start, end))
-
-            in_block = False
-
-    if in_block:
-        x_blocks.append((start, len(col_sum) - 1))
+    wh, ww = work_mask.shape[:2]
 
     # =========================
-    # FILTER X BLOCK
-    # ตัด gap / เสาแคบ / block ที่ไม่มีเขียวจริง
+    # HELPER: หา segment จาก projection
     # =========================
-    x_filtered = []
+    def find_segments(proj, th_ratio=0.25, min_len=20):
+        segs = []
+        if proj.size == 0 or np.max(proj) <= 0:
+            return segs
 
-    for (x1, x2) in x_blocks:
-        width = x2 - x1
+        th = float(np.max(proj)) * th_ratio
+        inside = False
+        start = 0
 
-        if width < rw * 0.06:
-            continue
+        for i, v in enumerate(proj):
+            if v > th and not inside:
+                start = i
+                inside = True
+            elif v <= th and inside:
+                end = i
+                if (end - start) >= min_len:
+                    segs.append((start, end))
+                inside = False
 
-        sub = green_mask[:, x1:x2]
-        density = np.sum(sub > 0) / (sub.size + 1e-6)
+        if inside:
+            end = len(proj) - 1
+            if (end - start) >= min_len:
+                segs.append((start, end))
 
-        if density < 0.02:
-            continue
-
-        x_filtered.append((x1, x2))
-
-    x_blocks = x_filtered
+        return segs
 
     # =========================
-    # SPLIT LARGE X BLOCK AGAIN
-    # กันกรณี merge ติดกันหลาย rack
+    # 1) หา column หลัก
     # =========================
-    def split_large(mask, x1, x2):
-        sub = mask[:, x1:x2]
-        proj = np.sum(sub > 0, axis=0).astype(np.float32)
+    col_proj = np.sum(work_mask > 0, axis=0).astype(np.float32)
 
-        if np.max(proj) <= 0:
-            return [(x1, x2)]
+    # smooth
+    col_proj = cv2.GaussianBlur(col_proj.reshape(1, -1), (31, 1), 0).ravel()
 
-        th = np.max(proj) * 0.30
-        local = []
-        in_local = False
+    col_segments = find_segments(
+        col_proj,
+        th_ratio=0.22,
+        min_len=max(20, int(ww * 0.06))
+    )
 
-        for i in range(len(proj)):
-            if proj[i] > th and not in_local:
-                sx = i
-                in_local = True
+    # fallback ถ้า segmentation ได้น้อยเกิน
+    if len(col_segments) == 0:
+        col_segments = [(0, ww - 1)]
 
-            elif proj[i] <= th and in_local:
-                ex = i
-                if (ex - sx) > rw * 0.05:
-                    local.append((x1 + sx, x1 + ex))
-                in_local = False
+    # ถ้ากว้างมาก → split เพิ่มแบบจิ๊กซอว์
+    final_cols = []
 
-        if in_local:
-            if (len(proj) - sx) > rw * 0.05:
-                local.append((x1 + sx, x2))
+    for (s, e) in col_segments:
+        width = e - s
 
-        return local if local else [(x1, x2)]
+        # ประเมินความกว้าง pallet 1 ช่องแบบหยาบ
+        est_col_w = max(60, int(ww * 0.16))
 
-    final_x_blocks = []
+        if width > est_col_w * 1.8:
+            ncols = int(round(width / float(est_col_w)))
+            ncols = max(2, ncols)
 
-    for (x1, x2) in x_blocks:
-        if (x2 - x1) > rw * 0.18:
-            final_x_blocks.extend(split_large(green_mask, x1, x2))
+            for i in range(ncols):
+                cs = s + int(i * width / ncols)
+                ce = s + int((i + 1) * width / ncols)
+                final_cols.append((cs, ce))
         else:
-            final_x_blocks.append((x1, x2))
+            final_cols.append((s, e))
 
-    x_blocks = final_x_blocks
-
-    # =========================
-    # STEP 2: SPLIT Y
-    # =========================
-    pallet_boxes = []
-
-    for (x1, x2) in x_blocks:
-
-        sub = green_mask[:, x1:x2]
-        row_sum = np.sum(sub > 0, axis=1).astype(np.float32)
-
-        if np.max(row_sum) <= 0:
-            continue
-
-        row_th = np.max(row_sum) * 0.30
-        in_row = False
-
-        for j in range(len(row_sum)):
-            if row_sum[j] > row_th and not in_row:
-                sy = j
-                in_row = True
-
-            elif row_sum[j] <= row_th and in_row:
-                ey = j
-                h = ey - sy
-                w = x2 - x1
-
-                if h > rh * 0.10:
-                    pallet_boxes.append((x1, sy, x2, ey))
-
-                in_row = False
-
-        if in_row:
-            ey = len(row_sum) - 1
-            h = ey - sy
-            if h > rh * 0.10:
-                pallet_boxes.append((x1, sy, x2, ey))
+    col_segments = final_cols
 
     # =========================
-    # FINAL FILTER
-    # ยืนยันว่าเป็น pallet จริง ไม่ใช่ล้อ/ช่องโล่ง/เสา
+    # 2) หา row หลัก (ชั้น)
     # =========================
-    final_boxes = []
+    row_proj = np.sum(work_mask > 0, axis=1).astype(np.float32)
+    row_proj = cv2.GaussianBlur(row_proj.reshape(-1, 1), (1, 21), 0).ravel()
 
-    for (x1, y1, x2, y2) in pallet_boxes:
-        w = x2 - x1
-        h = y2 - y1
+    row_segments = find_segments(
+        row_proj,
+        th_ratio=0.22,
+        min_len=max(18, int(wh * 0.08))
+    )
 
-        # ขนาดต้องใกล้ pallet จริง
-        if w < rw * 0.08:
-            continue
+    # ถ้าไม่เจอ ให้ใช้ 1 ชั้น
+    if len(row_segments) == 0:
+        row_segments = [(0, wh - 1)]
 
-        if h < rh * 0.10:
-            continue
+    # ถ้าก้อนสูงมาก → split เป็น 2 ชั้น
+    final_rows = []
 
-        if w > rw * 0.40:
-            continue
+    for (s, e) in row_segments:
+        height = e - s
+        est_row_h = max(70, int(wh * 0.30))
 
-        if h > rh * 0.65:
-            continue
+        if height > est_row_h * 1.6:
+            nrows = int(round(height / float(est_row_h)))
+            nrows = max(2, nrows)
 
-        # ต้องอยู่เหนือพื้นรถ
-        if y2 > bottom_cut:
-            continue
+            for i in range(nrows):
+                rs = s + int(i * height / nrows)
+                re = s + int((i + 1) * height / nrows)
+                final_rows.append((rs, re))
+        else:
+            final_rows.append((s, e))
 
-        sub = green_mask[y1:y2, x1:x2]
-        density = np.sum(sub > 0) / (sub.size + 1e-6)
-
-        # สำคัญ: ถ้าไม่มีเขียวพอ แค่ edge → ไม่ใช่ pallet
-        if density < 0.03:
-            continue
-
-        final_boxes.append((x1, y1, x2, y2))
-
-    # =========================
-    # MERGE เฉพาะแนวตั้ง
-    # ใช้กับ pallet ที่ซ้อน 2 ชั้นใน column เดียว
-    # =========================
-    def merge_vertical(boxes, y_dist=35):
-        merged = []
-
-        for (x1, y1, x2, y2) in boxes:
-            found = False
-
-            for i, (mx1, my1, mx2, my2) in enumerate(merged):
-                overlap_x = not (x2 < mx1 or x1 > mx2)
-                close_y = abs(y1 - my2) < y_dist or abs(y2 - my1) < y_dist
-
-                if overlap_x and close_y:
-                    merged[i] = (
-                        min(x1, mx1),
-                        min(y1, my1),
-                        max(x2, mx2),
-                        max(y2, my2)
-                    )
-                    found = True
-                    break
-
-            if not found:
-                merged.append((x1, y1, x2, y2))
-
-        return merged
-
-    final_boxes = merge_vertical(final_boxes)
+    row_segments = final_rows
 
     # =========================
-    # FALLBACK กัน 0
-    # ถ้าถูกกรองหมด แต่ยังมี x block → ใช้ x block สร้าง box แบบ conservative
+    # 3) สร้าง cell แบบจิ๊กซอว์
     # =========================
-    if len(final_boxes) == 0 and len(x_blocks) > 0:
-        for (x1, x2) in x_blocks:
-            sub = green_mask[:, x1:x2]
-            ys, xs = np.where(sub > 0)
+    pallet_count = 0
+    cell_boxes = []
 
-            if xs.size == 0 or ys.size == 0:
+    for (rs, re) in row_segments:
+        for (cs, ce) in col_segments:
+            x1 = x_min + cs
+            x2 = x_min + ce
+            y1 = y_min + rs
+            y2 = y_min + re
+
+            w = x2 - x1
+            h = y2 - y1
+
+            # filter ขนาด
+            if w < rw * 0.06:
                 continue
-
-            y1 = int(ys.min())
-            y2 = int(ys.max())
-
-            if (x2 - x1) < rw * 0.08:
+            if h < rh * 0.10:
                 continue
-
-            if (y2 - y1) < rh * 0.10:
-                continue
-
             if y2 > bottom_cut:
                 continue
 
-            final_boxes.append((x1, y1, x2, y2))
+            cell_green = green_mask[y1:y2, x1:x2]
+            density = np.sum(cell_green > 0) / (cell_green.size + 1e-6)
+
+            # ต้องมีเขียวพอสมควรถึงนับ
+            if density < 0.03:
+                continue
+
+            pallet_count += 1
+            cell_boxes.append((x1, y1, x2, y2))
+
+    # =========================
+    # 4) fallback กันนับขาด
+    # ถ้าได้น้อยเกิน 2 ให้ลองใช้ contour บน green_mask โดยตรง
+    # =========================
+    if pallet_count < 2:
+        contour_mask = green_mask.copy()
+
+        contours, _ = cv2.findContours(
+            contour_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        fallback_boxes = []
+
+        for c in contours:
+            x, y, w, h = cv2.boundingRect(c)
+
+            if w < rw * 0.08:
+                continue
+            if h < rh * 0.10:
+                continue
+            if y + h > bottom_cut:
+                continue
+
+            fallback_boxes.append((x, y, x + w, y + h))
+
+        if len(fallback_boxes) > pallet_count:
+            cell_boxes = fallback_boxes
+            pallet_count = len(fallback_boxes)
 
     # =========================
     # DRAW RESULT
     # =========================
-    pallet_count = 0
+    # วาดกรอบรวมของงาน
+    cv2.rectangle(
+        debug_grid,
+        (x_min, y_min),
+        (x_max, y_max),
+        (255, 0, 255),
+        2
+    )
 
-    for i, (x1, y1, x2, y2) in enumerate(final_boxes, 1):
-        pallet_count += 1
+    # วาดแนว column
+    for (cs, ce) in col_segments:
+        x1 = x_min + cs
+        x2 = x_min + ce
+        cv2.rectangle(
+            debug_grid,
+            (x1, y_min),
+            (x2, y_max),
+            (255, 255, 0),
+            1
+        )
 
+    # วาดแนว row
+    for (rs, re) in row_segments:
+        y1 = y_min + rs
+        y2 = y_min + re
+        cv2.rectangle(
+            debug_grid,
+            (x_min, y1),
+            (x_max, y2),
+            (0, 255, 255),
+            1
+        )
+
+    for i, (x1, y1, x2, y2) in enumerate(cell_boxes, 1):
         cv2.rectangle(
             debug_img,
             (x1, y1),
@@ -420,7 +408,7 @@ def gen_pallet(img, debug=True):
         cv2.putText(
             debug_img,
             f"P{i}",
-            (x1 + 5, y1 + 30),
+            (x1 + 5, y1 + 28),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 0, 255),
@@ -438,15 +426,19 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("FINAL PALLET =", pallet_count)
+    print("JIGSAW PALLET =", pallet_count)
+    print("COL SEGMENTS =", len(col_segments))
+    print("ROW SEGMENTS =", len(row_segments))
     print("=" * 50)
 
     if debug:
         save_debug("debug_green_mask.jpg", green_mask)
         save_debug("debug_edges.jpg", edges)
+        save_debug("debug_grid.jpg", debug_grid)
         save_debug("debug_pallet_box.jpg", debug_img)
 
     return pallet_count
+
 
 # =========================
 # APPSHEET
