@@ -698,10 +698,262 @@ def gen_volume(img, debug=True, return_empty=False):
     return output_volume
 
 
-def gen_pallet(img, debug=True):
+def gen_pallet(img, debug=True):def gen_pallet(img, debuguringElement(cv2.MORPH_RECT, (k, k))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, ker, iterations=it)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker, iterations=1)
+        return mask
+
+    def nms(boxes, dist=0.45):
+        out = []
+        for b in boxes:
+            x, y, w, h = b
+            cx, cy = x + w / 2, y + h / 2
+            dup = False
+
+            for ob in out:
+                ox, oy, ow, oh = ob
+                ocx, ocy = ox + ow / 2, oy + oh / 2
+
+                if abs(cx - ocx) < min(w, ow) * dist and abs(cy - ocy) < min(h, oh) * dist:
+                    dup = True
+                    break
+
+            if not dup:
+                out.append(b)
+
+        return out
+
+    def make_grid_count(box, mask, draw, min_fill=0.010):
+        x, y, w, h = box
+
+        if w <= 0 or h <= 0:
+            return []
+
+        # estimate dynamic grid จากขนาด block
+        cols = int(round(w / 185))
+        rows = int(round(h / 150))
+
+        cols = max(1, min(8, cols))
+        rows = max(1, min(4, rows))
+
+        result = []
+
+        for r in range(rows):
+            for c in range(cols):
+                x1 = x + int(c * w / cols)
+                x2 = x + int((c + 1) * w / cols)
+                y1 = y + int(r * h / rows)
+                y2 = y + int((r + 1) * h / rows)
+
+                cw = x2 - x1
+                ch = y2 - y1
+
+                if cw < 45 or ch < 45:
+                    continue
+
+                crop = mask[y1:y2, x1:x2]
+                fill = cv2.countNonZero(crop) / float(max(1, cw * ch))
+
+                if fill >= min_fill:
+                    result.append((x1, y1, cw, ch))
+                    cv2.rectangle(draw, (x1, y1), (x2, y2), (0, 180, 255), 1)
+
+        # draw grid line
+        for c in range(cols + 1):
+            gx = x + int(c * w / cols)
+            cv2.line(draw, (gx, y), (gx, y + h), (255, 255, 0), 1)
+
+        for r in range(rows + 1):
+            gy = y + int(r * h / rows)
+            cv2.line(draw, (x, gy), (x + w, gy), (255, 255, 0), 1)
+
+        cv2.putText(draw, f"{cols}x{rows}", (x + 5, max(25, y - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
+        return result
+
+    if img is not None and img.size > 0:
+        img = cv2.resize(img, (1280, 720))
+        H, W = img.shape[:2]
+
+        # ROI กว้างขึ้นสำหรับภาพ side truck
+        roi = img[int(H * 0.17):int(H * 0.84), int(W * 0.01):int(W * 0.99)]
+
+        if roi.size > 0:
+            rh, rw = roi.shape[:2]
+
+            lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            l = cv2.createCLAHE(2.0, (8, 8)).apply(l)
+            norm = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+
+            hsv = cv2.cvtColor(norm, cv2.COLOR_BGR2HSV)
+            gray = cv2.cvtColor(norm, cv2.COLOR_BGR2GRAY)
+
+            # mask หลัก
+            cream = cv2.inRange(hsv, (5, 8, 55), (48, 175, 255))
+            white = cv2.inRange(hsv, (0, 0, 105), (180, 85, 255))
+            blue = cv2.inRange(hsv, (85, 25, 25), (135, 255, 255))
+            green = cv2.inRange(hsv, (35, 25, 25), (95, 255, 255))
+            carton = cv2.inRange(hsv, (7, 20, 55), (38, 190, 255))
+
+            # ตัดเพดาน/กันชนล่าง ลด false positive
+            for m in [cream, white, blue, green, carton]:
+                m[:int(rh * 0.08), :] = 0
+                m[int(rh * 0.90):, :] = 0
+
+            edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 45, 130)
+
+            frame_mask = cv2.bitwise_or(cream, white)
+            frame_mask = cv2.bitwise_or(frame_mask, blue)
+            frame_mask = cv2.bitwise_or(frame_mask, green)
+            frame_mask = clean(frame_mask, 5, 1)
+
+            carton_mask = clean(carton, 9, 1)
+
+            edge_mask = cv2.bitwise_and(edges, cv2.bitwise_or(frame_mask, carton_mask))
+
+            pallet_mask = cv2.bitwise_or(frame_mask, carton_mask)
+            pallet_mask = cv2.bitwise_or(pallet_mask, edge_mask)
+            pallet_mask = clean(pallet_mask, 5, 1)
+
+            # กัน mask ติดหลังคา/ผนังมากไป
+            pallet_mask[:int(rh * 0.10), :] = 0
+            pallet_mask[int(rh * 0.90):, :] = 0
+
+            cargo_mask = clean(pallet_mask, 17, 2)
+
+            debug_blocks = roi.copy()
+            debug_grid = roi.copy()
+            debug_count = roi.copy()
+
+            color = roi.copy()
+            color[pallet_mask > 0] = (0, 255, 0)
+            color[carton_mask > 0] = (0, 180, 255)
+            debug_overlay = cv2.addWeighted(roi, 0.75, color, 0.25, 0)
+
+            # หา block จาก contour
+            cnts, _ = cv2.findContours(cargo_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            blocks = []
+
+            for cnt in cnts:
+                x, y, w, h = cv2.boundingRect(cnt)
+                area = w * h
+
+                if area < rw * rh * 0.010:
+                    continue
+                if w < rw * 0.06 or h < rh * 0.16:
+                    continue
+                if y > rh * 0.78:
+                    continue
+
+                blocks.append((x, y, w, h))
+
+            # fallback สำคัญ: ถ้า detect block ไม่ได้ ให้ใช้ bbox จาก pixel mask
+            if len(blocks) == 0:
+                ys, xs = np.where(pallet_mask > 0)
+
+                if xs.size > 0 and ys.size > 0:
+                    x1 = int(xs.min())
+                    x2 = int(xs.max())
+                    y1 = int(ys.min())
+                    y2 = int(ys.max())
+
+                    pad_x = int((x2 - x1) * 0.02)
+                    pad_y = int((y2 - y1) * 0.03)
+
+                    x1 = max(0, x1 - pad_x)
+                    y1 = max(0, y1 - pad_y)
+                    x2 = min(rw - 1, x2 + pad_x)
+                    y2 = min(rh - 1, y2 + pad_y)
+
+                    if (x2 - x1) > rw * 0.20 and (y2 - y1) > rh * 0.20:
+                        blocks.append((x1, y1, x2 - x1, y2 - y1))
+
+            # ถ้ามีหลาย block ให้นับแยก แต่ถ้า block ซ้อน/ติดกันมาก ให้รวมเป็น block ใหญ่
+            if len(blocks) > 1:
+                xs = [b[0] for b in blocks]
+                ys = [b[1] for b in blocks]
+                xes = [b[0] + b[2] for b in blocks]
+                yes = [b[1] + b[3] for b in blocks]
+
+                ux, uy = min(xs), min(ys)
+                ux2, uy2 = max(xes), max(yes)
+
+                union_w = ux2 - ux
+                union_h = uy2 - uy
+
+                if union_w > rw * 0.45 and union_h > rh * 0.30:
+                    blocks = [(ux, uy, union_w, union_h)]
+
+            blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
+
+            # วาด block
+            for i, (x, y, w, h) in enumerate(blocks, 1):
+                cv2.rectangle(debug_blocks, (x, y), (x + w, y + h), (255, 0, 255), 3)
+                cv2.putText(debug_blocks, f"B{i}", (x + 5, y + 28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
+
+            # นับ cell
+            for x, y, w, h in blocks:
+                crop_carton = carton_mask[y:y + h, x:x + w]
+                crop_pallet = pallet_mask[y:y + h, x:x + w]
+
+                area = float(max(1, w * h))
+                carton_ratio = cv2.countNonZero(crop_carton) / area
+                pallet_ratio = cv2.countNonZero(crop_pallet) / area
+
+                # กล่องกระดาษตันขนาดใหญ่ เช่น ซ้ายภาพแรก
+                if carton_ratio > 0.30 and pallet_ratio < 0.45 and w > rw * 0.10:
+                    est_rows = max(1, min(3, round(h / 190)))
+
+                    for i in range(est_rows):
+                        cy1 = y + int(i * h / est_rows)
+                        cy2 = y + int((i + 1) * h / est_rows)
+                        cells.append((x, cy1, w, cy2 - cy1))
+                        cv2.rectangle(debug_grid, (x, cy1), (x + w, cy2), (0, 180, 255), 2)
+                else:
+                    cells.extend(make_grid_count((x, y, w, h), pallet_mask, debug_grid, min_fill=0.010))
+
+            cells = nms(cells)
+
+            # วาดผลนับจริง
+            for i, (x, y, w, h) in enumerate(cells, 1):
+                cv2.rectangle(debug_count, (x, y), (x + w, y + h), (0, 255, 0), 3)
+                cv2.putText(debug_count, str(i), (x + 7, y + 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+
+            cv2.putText(debug_count, f"PALLET={len(cells)}", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
+
+            cv2.putText(debug_blocks, f"BLOCKS={len(blocks)}", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 0, 255), 3)
+
+            cv2.putText(debug_grid, "GRID / CANDIDATE CELLS", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 3)
+
+            save_dbg("debug_original.jpg", roi)
+            save_dbg("debug_normalized.jpg", norm)
+            save_dbg("debug_cargo.jpg", cargo_mask)
+            save_dbg("debug_pallet_mask.jpg", pallet_mask)
+            save_dbg("debug_box_mask.jpg", carton_mask)
+            save_dbg("debug_overlay.jpg", debug_overlay)
+            save_dbg("debug_blocks.jpg", debug_blocks)
+            save_dbg("debug_grid.jpg", debug_grid)
+            save_dbg("debug_pallet_box.jpg", debug_count)
+
+            print("=" * 50)
+            print("PALLET DEBUG V2")
+            print(f"ROI SIZE     : {rw}x{rh}")
+            print(f"BLOCKS       : {len(blocks)}")
+            print(f"PALLET COUNT : {len(cells)}")
+            print("=" * 50)
+
+    return len(cells)
     cells = []
 
-    def save_debug_local(name, im):
+    def save_dbg(name, im):
         if not debug or im is None:
             return
         try:
@@ -710,222 +962,6 @@ def gen_pallet(img, debug=True):
             cv2.imwrite(os.path.join(DEBUG_DIR, name), im)
 
     def clean(mask, k=5, it=1):
-        if mask is None or mask.size == 0:
-            return mask
-        ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, ker, iterations=it)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker, iterations=1)
-        return mask
-
-    def smooth(arr, k=21):
-        if arr.size == 0:
-            return arr
-        k = max(3, min(k, arr.size))
-        if k % 2 == 0:
-            k -= 1
-        kernel = np.ones(k, dtype=np.float32) / float(k)
-        return np.convolve(arr.astype(np.float32), kernel, mode="same")
-
-    def merge_lines(pos, gap):
-        if len(pos) == 0:
-            return []
-        pos = sorted(pos)
-        out = [pos[0]]
-        for p in pos[1:]:
-            if p - out[-1] > gap:
-                out.append(p)
-        return out
-
-    def get_lines(mask, axis=0, thr=0.20, gap=18):
-        if mask is None or mask.size == 0:
-            return []
-        proj = np.sum(mask > 0, axis=axis).astype(np.float32)
-        if proj.size == 0 or np.max(proj) <= 0:
-            return []
-        proj = smooth(proj, 21)
-        idx = np.where(proj > np.max(proj) * thr)[0]
-        return merge_lines(idx.tolist(), gap)
-
-    def nms(boxes, dist=0.45):
-        out = []
-        for b in boxes:
-            x, y, w, h = b
-            cx, cy = x + w / 2, y + h / 2
-            dup = False
-            for ob in out:
-                ox, oy, ow, oh = ob
-                ocx, ocy = ox + ow / 2, oy + oh / 2
-                if abs(cx - ocx) < min(w, ow) * dist and abs(cy - ocy) < min(h, oh) * dist:
-                    dup = True
-                    break
-            if not dup:
-                out.append(b)
-        return out
-
-    def count_grid(mask, box, draw_img=None, min_fill=0.012):
-        x, y, w, h = box
-        crop = mask[y:y + h, x:x + w]
-        if crop.size == 0:
-            return []
-
-        v = get_lines(crop, axis=0, thr=0.18, gap=max(14, w // 25))
-        hln = get_lines(crop, axis=1, thr=0.18, gap=max(12, h // 18))
-
-        if len(v) < 2:
-            cols = max(1, min(8, round(w / 170)))
-            v = [int(i * w / cols) for i in range(cols + 1)]
-        else:
-            v = [0] + v + [w - 1]
-
-        if len(hln) < 2:
-            rows = max(1, min(4, round(h / 150)))
-            hln = [int(i * h / rows) for i in range(rows + 1)]
-        else:
-            hln = [0] + hln + [h - 1]
-
-        if draw_img is not None:
-            for vx in v:
-                cv2.line(draw_img, (x + vx, y), (x + vx, y + h), (255, 255, 0), 1)
-            for hy in hln:
-                cv2.line(draw_img, (x, y + hy), (x + w, y + hy), (255, 255, 0), 1)
-
-        local = []
-        for r in range(len(hln) - 1):
-            for c in range(len(v) - 1):
-                x1, x2 = v[c], v[c + 1]
-                y1, y2 = hln[r], hln[r + 1]
-                cw, ch = x2 - x1, y2 - y1
-
-                if cw < w * 0.08 or ch < h * 0.16:
-                    continue
-
-                cell = crop[y1:y2, x1:x2]
-                fill = cv2.countNonZero(cell) / float(max(1, cw * ch))
-
-                if fill >= min_fill:
-                    local.append((x + x1, y + y1, cw, ch))
-                    if draw_img is not None:
-                        cv2.rectangle(draw_img, (x + x1, y + y1), (x + x2, y + y2), (0, 180, 255), 1)
-
-        return local
-
-    if img is not None and img.size > 0:
-        img = cv2.resize(img, (1280, 720))
-        H, W = img.shape[:2]
-
-        roi = img[int(H * 0.20):int(H * 0.82), int(W * 0.02):int(W * 0.98)]
-
-        if roi.size > 0:
-            rh, rw = roi.shape[:2]
-
-            lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
-            norm = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
-
-            hsv = cv2.cvtColor(norm, cv2.COLOR_BGR2HSV)
-            gray = cv2.cvtColor(norm, cv2.COLOR_BGR2GRAY)
-
-            cream = cv2.inRange(hsv, (5, 10, 65), (45, 150, 255))
-            white = cv2.inRange(hsv, (0, 0, 120), (180, 70, 255))
-            blue = cv2.inRange(hsv, (90, 35, 35), (130, 255, 255))
-            box_mask = cv2.inRange(hsv, (8, 25, 70), (35, 180, 245))
-
-            for m in [cream, white, blue, box_mask]:
-                m[:int(rh * 0.04), :] = 0
-                m[int(rh * 0.88):, :] = 0
-
-            frame_mask = cv2.bitwise_or(cv2.bitwise_or(cream, white), blue)
-            frame_mask = clean(frame_mask, 5, 1)
-            box_mask = clean(box_mask, 9, 2)
-
-            edges = cv2.Canny(gray, 50, 140)
-            rack_mask = cv2.bitwise_or(frame_mask, cv2.bitwise_and(edges, frame_mask))
-            rack_mask = clean(rack_mask, 3, 1)
-
-            cargo_mask = cv2.bitwise_or(rack_mask, box_mask)
-            cargo_mask = clean(cargo_mask, 15, 2)
-
-            debug_blocks = roi.copy()
-            debug_grid = roi.copy()
-            debug_count = roi.copy()
-            mask_color = roi.copy()
-
-            mask_color[rack_mask > 0] = (0, 255, 0)
-            mask_color[box_mask > 0] = (0, 180, 255)
-            debug_overlay = cv2.addWeighted(roi, 0.75, mask_color, 0.25, 0)
-
-            cnts, _ = cv2.findContours(cargo_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            blocks = []
-
-            for c in cnts:
-                x, y, w, h = cv2.boundingRect(c)
-                area = w * h
-
-                if area < rw * rh * 0.015:
-                    continue
-                if h < rh * 0.22 or w < rw * 0.08:
-                    continue
-                if y > rh * 0.72:
-                    continue
-
-                blocks.append((x, y, w, h))
-
-            blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
-
-            for i, (x, y, w, h) in enumerate(blocks, 1):
-                cv2.rectangle(debug_blocks, (x, y), (x + w, y + h), (255, 0, 255), 3)
-                cv2.putText(debug_blocks, f"B{i}", (x + 5, y + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
-
-            for x, y, w, h in blocks:
-                area = float(max(1, w * h))
-
-                blue_ratio = cv2.countNonZero(blue[y:y + h, x:x + w]) / area
-                box_ratio = cv2.countNonZero(box_mask[y:y + h, x:x + w]) / area
-                rack_ratio = cv2.countNonZero(rack_mask[y:y + h, x:x + w]) / area
-
-                if box_ratio > 0.28 and rack_ratio < 0.20:
-                    est_row = max(1, min(3, round(h / 190)))
-
-                    for i in range(est_row):
-                        cy1 = y + int(i * h / est_row)
-                        cy2 = y + int((i + 1) * h / est_row)
-                        cells.append((x, cy1, w, cy2 - cy1))
-                        cv2.rectangle(debug_grid, (x, cy1), (x + w, cy2), (0, 180, 255), 2)
-
-                    continue
-
-                if blue_ratio > 0.015 or rack_ratio > 0.035:
-                    cells.extend(count_grid(rack_mask, (x, y, w, h), draw_img=debug_grid, min_fill=0.012))
-
-            cells = nms(cells)
-
-            for i, (x, y, w, h) in enumerate(cells, 1):
-                cv2.rectangle(debug_count, (x, y), (x + w, y + h), (0, 255, 0), 3)
-                cv2.putText(debug_count, str(i), (x + 7, y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
-
-            cv2.putText(debug_count, f"PALLET={len(cells)}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
-            cv2.putText(debug_blocks, f"BLOCKS={len(blocks)}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.1, (255, 0, 255), 3)
-            cv2.putText(debug_grid, "GRID / CANDIDATE CELLS", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 3)
-
-            save_debug_local("debug_original.jpg", roi)
-            save_debug_local("debug_normalized.jpg", norm)
-            save_debug_local("debug_cargo.jpg", cargo_mask)
-            save_debug_local("debug_pallet_mask.jpg", rack_mask)
-            save_debug_local("debug_box_mask.jpg", box_mask)
-            save_debug_local("debug_overlay.jpg", debug_overlay)
-            save_debug_local("debug_blocks.jpg", debug_blocks)
-            save_debug_local("debug_grid.jpg", debug_grid)
-            save_debug_local("debug_pallet_box.jpg", debug_count)
-
-            print("=" * 50)
-            print("PALLET DEBUG")
-            print(f"ROI SIZE     : {rw}x{rh}")
-            print(f"BLOCKS       : {len(blocks)}")
-            print(f"PALLET COUNT : {len(cells)}")
-            print("=" * 50)
-
-    return len(cells)
 
     
 # =========================
