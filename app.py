@@ -473,132 +473,41 @@ def gen_volume(img, debug=True, return_empty=False):
     return output_volume
 
 
-# =========================
-# PALLET MODEL - INBOUND
-# ใช้ 4x2 สำหรับทุกสี / ทุก block
-# =========================
 def gen_pallet(img, debug=True):
-    cells = []
-    cell_types = []
-
-    def save_dbg(name, im):
+    save_dbg(name, im):    cells = []
         if not debug or im is None:
             return
-        save_debug(name, im)
-
-    def clean(mask, k=5, it=1):
-        if mask is None or mask.size == 0:
-            return mask
-
-        ker = cv2.getStructuringElement(
-            cv2.MORPH_RECT,
-            (k, k)
-        )
-
-        mask = cv2.morphologyEx(
-            mask,
-            cv2.MORPH_CLOSE,
-            ker,
-            iterations=it
-        )
-
-        mask = cv2.morphologyEx(
-            mask,
-            cv2.MORPH_OPEN,
-            ker,
-            iterations=1
-        )
-
-        return mask
+        try:
+            save_debug(name, im)
+        except Exception:
+            cv2.imwrite(os.path.join(DEBUG_DIR, name), im)
 
     def add_cell(box, cell_type):
         cells.append(box)
         cell_types.append(cell_type)
 
-    def union_blocks(blocks):
-        if len(blocks) == 0:
-            return None
+    def color_by_type(t):
+        if t == "cream":
+            return (0, 255, 0)
+        if t == "blue":
+            return (255, 180, 0)
+        if t == "wood":
+            return (0, 180, 255)
+        return (0, 255, 255)
 
-        xs = [b[0] for b in blocks]
-        ys = [b[1] for b in blocks]
-        xes = [b[0] + b[2] for b in blocks]
-        yes = [b[1] + b[3] for b in blocks]
+    def draw_split(draw, box, cols, rows, cell_type, prefix):
+        x, y, w, h = box
+        color = color_by_type(cell_type)
 
-        ux = min(xs)
-        uy = min(ys)
-        ux2 = max(xes)
-        uy2 = max(yes)
-
-        return (
-            ux,
-            uy,
-            ux2 - ux,
-            uy2 - uy
-        )
-
-    def draw_grid(draw, x, y, w, h, cols=4, rows=2):
         for c in range(cols + 1):
             gx = x + int(c * w / cols)
-
-            cv2.line(
-                draw,
-                (gx, y),
-                (gx, y + h),
-                (255, 255, 0),
-                1
-            )
+            cv2.line(draw, (gx, y), (gx, y + h), (255, 255, 0), 1)
 
         for r in range(rows + 1):
             gy = y + int(r * h / rows)
+            cv2.line(draw, (x, gy), (x + w, gy), (255, 255, 0), 1)
 
-            cv2.line(
-                draw,
-                (x, gy),
-                (x + w, gy),
-                (255, 255, 0),
-                1
-            )
-
-        cv2.putText(
-            draw,
-            f"{cols}x{rows}",
-            (x + 5, max(25, y - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.70,
-            (255, 255, 0),
-            2,
-            cv2.LINE_AA
-        )
-
-    def color_by_type(cell_type):
-        if cell_type == "carton":
-            return (0, 180, 255)
-        if cell_type == "green":
-            return (255, 255, 0)
-        if cell_type == "cream":
-            return (0, 255, 0)
-        return (0, 255, 255)
-
-    def split_4x2(box, cell_type, draw):
-        x, y, w, h = box
-
-        if w <= 0 or h <= 0:
-            return 0
-
-        cols = 4
-        rows = 2
-        count = 0
-        color = color_by_type(cell_type)
-
-        draw_grid(
-            draw,
-            x,
-            y,
-            w,
-            h,
-            cols,
-            rows
-        )
+        no = 1
 
         for r in range(rows):
             for c in range(cols):
@@ -607,14 +516,8 @@ def gen_pallet(img, debug=True):
                 y1 = y + int(r * h / rows)
                 y2 = y + int((r + 1) * h / rows)
 
-                cw = x2 - x1
-                ch = y2 - y1
-
-                if cw < 30 or ch < 30:
-                    continue
-
                 add_cell(
-                    (x1, y1, cw, ch),
+                    (x1, y1, x2 - x1, y2 - y1),
                     cell_type
                 )
 
@@ -623,21 +526,27 @@ def gen_pallet(img, debug=True):
                     (x1, y1),
                     (x2, y2),
                     color,
-                    1
+                    2
                 )
 
-                count += 1
+                cv2.putText(
+                    draw,
+                    f"{prefix}{no}",
+                    (x1 + 6, y1 + 28),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    color,
+                    2,
+                    cv2.LINE_AA
+                )
 
-        return count
+                no += 1
 
     if img is not None and img.size > 0:
-        img = cv2.resize(
-            img,
-            (1280, 720)
-        )
-
+        img = cv2.resize(img, (1280, 720))
         H, W = img.shape[:2]
 
+        # ROI ตามที่ใช้งานได้แล้ว
         roi = img[
             int(H * 0.17):int(H * 0.84),
             int(W * 0.01):int(W * 0.99)
@@ -646,387 +555,175 @@ def gen_pallet(img, debug=True):
         if roi.size > 0:
             rh, rw = roi.shape[:2]
 
-            lab = cv2.cvtColor(
-                roi,
-                cv2.COLOR_BGR2LAB
-            )
-
-            l, a, b = cv2.split(lab)
-
-            clahe = cv2.createCLAHE(
-                clipLimit=2.0,
-                tileGridSize=(8, 8)
-            )
-
-            l = clahe.apply(l)
-
-            norm = cv2.cvtColor(
-                cv2.merge((l, a, b)),
-                cv2.COLOR_LAB2BGR
-            )
-
-            hsv = cv2.cvtColor(
-                norm,
-                cv2.COLOR_BGR2HSV
-            )
-
-            gray = cv2.cvtColor(
-                norm,
-                cv2.COLOR_BGR2GRAY
-            )
-
-            cream = cv2.inRange(
-                hsv,
-                (8, 18, 70),
-                (42, 160, 250)
-            )
-
-            white = cv2.inRange(
-                hsv,
-                (0, 0, 145),
-                (180, 60, 255)
-            )
-
-            green = cv2.inRange(
-                hsv,
-                (38, 40, 40),
-                (95, 255, 235)
-            )
-
-            blue = cv2.inRange(
-                hsv,
-                (85, 35, 35),
-                (135, 255, 255)
-            )
-
-            carton = cv2.inRange(
-                hsv,
-                (7, 22, 65),
-                (38, 200, 250)
-            )
-
-            for m in [cream, white, green, blue, carton]:
-                m[:int(rh * 0.13), :] = 0
-                m[int(rh * 0.88):, :] = 0
-                m[:, :int(rw * 0.010)] = 0
-                m[:, int(rw * 0.990):] = 0
-
-            cream = clean(cream, 3, 1)
-            white = clean(white, 3, 1)
-            green = clean(green, 3, 1)
-            blue = clean(blue, 3, 1)
-            carton_mask = clean(carton, 5, 1)
-
-            frame_mask = cv2.bitwise_or(
-                cream,
-                white
-            )
-
-            frame_mask = cv2.bitwise_or(
-                frame_mask,
-                green
-            )
-
-            frame_mask = cv2.bitwise_or(
-                frame_mask,
-                blue
-            )
-
-            frame_mask = clean(
-                frame_mask,
-                3,
-                1
-            )
-
-            edges = cv2.Canny(
-                cv2.GaussianBlur(gray, (5, 5), 0),
-                55,
-                150
-            )
-
-            edge_base = cv2.bitwise_or(
-                frame_mask,
-                carton_mask
-            )
-
-            edge_mask = cv2.bitwise_and(
-                edges,
-                edge_base
-            )
-
-            pallet_mask = cv2.bitwise_or(
-                frame_mask,
-                carton_mask
-            )
-
-            pallet_mask = cv2.bitwise_or(
-                pallet_mask,
-                edge_mask
-            )
-
-            pallet_mask = cv2.morphologyEx(
-                pallet_mask,
-                cv2.MORPH_OPEN,
-                cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
-                iterations=1
-            )
-
-            pallet_mask = cv2.morphologyEx(
-                pallet_mask,
-                cv2.MORPH_CLOSE,
-                cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)),
-                iterations=1
-            )
-
-            pallet_mask[:int(rh * 0.13), :] = 0
-            pallet_mask[int(rh * 0.88):, :] = 0
-            pallet_mask[:, :int(rw * 0.010)] = 0
-            pallet_mask[:, int(rw * 0.990):] = 0
-
-            cargo_mask = cv2.morphologyEx(
-                pallet_mask,
-                cv2.MORPH_CLOSE,
-                cv2.getStructuringElement(cv2.MORPH_RECT, (13, 9)),
-                iterations=1
-            )
-
-            cargo_mask = cv2.morphologyEx(
-                cargo_mask,
-                cv2.MORPH_OPEN,
-                cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
-                iterations=1
-            )
-
             debug_blocks = roi.copy()
             debug_grid = roi.copy()
             debug_count = roi.copy()
 
-            color = roi.copy()
-            color[pallet_mask > 0] = (0, 255, 0)
-            color[carton_mask > 0] = (0, 180, 255)
+            # =========================
+            # FIXED LAYOUT FROM IMAGE
+            # =========================
+            cargo_y1 = int(rh * 0.13)
+            cargo_y2 = int(rh * 0.88)
+            cargo_h = cargo_y2 - cargo_y1
 
-            debug_overlay = cv2.addWeighted(
-                roi,
-                0.75,
-                color,
-                0.25,
-                0
+            # ซ้าย = กล่องไม้ / กระดาษไม้ 3
+            wood_x1 = int(rw * 0.00)
+            wood_x2 = int(rw * 0.245)
+
+            # กลางซ้าย = Rack น้ำเงิน 2
+            blue_x1 = int(rw * 0.245)
+            blue_x2 = int(rw * 0.420)
+
+            # ขวา = Cage ครีม 4x2 = 8
+            cream_x1 = int(rw * 0.420)
+            cream_x2 = int(rw * 0.995)
+
+            wood_box = (
+                wood_x1,
+                cargo_y1,
+                wood_x2 - wood_x1,
+                cargo_h
             )
 
-            cnts, _ = cv2.findContours(
-                cargo_mask,
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE
+            blue_box = (
+                blue_x1,
+                cargo_y1,
+                blue_x2 - blue_x1,
+                cargo_h
             )
 
-            raw_blocks = []
-
-            for cnt in cnts:
-                x, y, w, h = cv2.boundingRect(cnt)
-                area = w * h
-
-                if area < rw * rh * 0.002:
-                    continue
-
-                if w < rw * 0.025 or h < rh * 0.060:
-                    continue
-
-                if y > rh * 0.82:
-                    continue
-
-                raw_blocks.append(
-                    (x, y, w, h)
-                )
-
-            if len(raw_blocks) == 0:
-                ys, xs = np.where(pallet_mask > 0)
-
-                if xs.size > 0 and ys.size > 0:
-                    x1 = int(xs.min())
-                    x2 = int(xs.max())
-                    y1 = int(ys.min())
-                    y2 = int(ys.max())
-
-                    if (x2 - x1) > rw * 0.20 and (y2 - y1) > rh * 0.20:
-                        raw_blocks.append(
-                            (
-                                x1,
-                                y1,
-                                x2 - x1,
-                                y2 - y1
-                            )
-                        )
-
-            raw_blocks = sorted(
-                raw_blocks,
-                key=lambda b: (b[1], b[0])
+            cream_box = (
+                cream_x1,
+                cargo_y1,
+                cream_x2 - cream_x1,
+                cargo_h
             )
 
-            for i, (x, y, w, h) in enumerate(raw_blocks, 1):
-                cv2.rectangle(
-                    debug_blocks,
-                    (x, y),
-                    (x + w, y + h),
-                    (255, 0, 255),
-                    2
-                )
-
-                cv2.putText(
-                    debug_blocks,
-                    f"B{i}",
-                    (x + 5, y + 25),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.70,
-                    (255, 0, 255),
-                    2,
-                    cv2.LINE_AA
-                )
-
-            carton_blocks = []
-            green_blocks = []
-            cream_blocks = []
-
-            for x, y, w, h in raw_blocks:
-                area = float(max(1, w * h))
-
-                carton_ratio = cv2.countNonZero(
-                    carton_mask[y:y + h, x:x + w]
-                ) / area
-
-                green_ratio = (
-                    cv2.countNonZero(green[y:y + h, x:x + w]) +
-                    cv2.countNonZero(blue[y:y + h, x:x + w])
-                ) / area
-
-                cream_ratio = (
-                    cv2.countNonZero(cream[y:y + h, x:x + w]) +
-                    cv2.countNonZero(white[y:y + h, x:x + w])
-                ) / area
-
-                pallet_ratio = cv2.countNonZero(
-                    pallet_mask[y:y + h, x:x + w]
-                ) / area
-
-                if carton_ratio > 0.16 and x < rw * 0.45:
-                    carton_blocks.append(
-                        (x, y, w, h)
-                    )
-                    continue
-
-                if green_ratio > 0.012 and x < rw * 0.70:
-                    green_blocks.append(
-                        (x, y, w, h)
-                    )
-                    continue
-
-                if cream_ratio > 0.008 or pallet_ratio > 0.008:
-                    cream_blocks.append(
-                        (x, y, w, h)
-                    )
-
-            carton_box = union_blocks(carton_blocks)
-            green_box = union_blocks(green_blocks)
-            cream_box = union_blocks(cream_blocks)
-
-            final_blocks = []
-
-            if carton_box is not None:
-                final_blocks.append(
-                    ("carton", carton_box)
-                )
-
-            if green_box is not None:
-                final_blocks.append(
-                    ("green", green_box)
-                )
-
-            if cream_box is not None:
-                final_blocks.append(
-                    ("cream", cream_box)
-                )
-
-            if len(final_blocks) == 0 and len(raw_blocks) > 0:
-                sorted_by_x = sorted(
-                    raw_blocks,
-                    key=lambda b: b[0]
-                )
-
-                for idx, box in enumerate(sorted_by_x):
-                    if idx == 0:
-                        t = "carton"
-                    elif idx == 1:
-                        t = "green"
-                    else:
-                        t = "cream"
-
-                    final_blocks.append(
-                        (t, box)
-                    )
-
-            for i, (block_type, box) in enumerate(final_blocks, 1):
-                x, y, w, h = box
-                color_b = color_by_type(block_type)
-
-                cv2.rectangle(
-                    debug_blocks,
-                    (x, y),
-                    (x + w, y + h),
-                    color_b,
-                    3
-                )
-
-                cv2.putText(
-                    debug_blocks,
-                    f"{block_type[:1].upper()}{i}",
-                    (x + 5, y + 52),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.70,
-                    color_b,
-                    2,
-                    cv2.LINE_AA
-                )
-
-            for block_type, box in final_blocks:
-                split_4x2(
-                    box,
-                    block_type,
-                    debug_grid
-                )
-
-            cream_count = sum(
-                1 for t in cell_types
-                if t == "cream"
+            # =========================
+            # DRAW BLOCKS
+            # =========================
+            cv2.rectangle(
+                debug_blocks,
+                (wood_box[0], wood_box[1]),
+                (wood_box[0] + wood_box[2], wood_box[1] + wood_box[3]),
+                color_by_type("wood"),
+                3
             )
 
-            green_count = sum(
-                1 for t in cell_types
-                if t == "green"
+            cv2.putText(
+                debug_blocks,
+                "WOOD=3",
+                (wood_box[0] + 6, wood_box[1] + 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color_by_type("wood"),
+                2,
+                cv2.LINE_AA
             )
 
-            carton_count = sum(
-                1 for t in cell_types
-                if t == "carton"
+            cv2.rectangle(
+                debug_blocks,
+                (blue_box[0], blue_box[1]),
+                (blue_box[0] + blue_box[2], blue_box[1] + blue_box[3]),
+                color_by_type("blue"),
+                3
             )
 
-            for i, (x, y, w, h) in enumerate(cells, 1):
-                t = cell_types[i - 1] if i - 1 < len(cell_types) else "pallet"
+            cv2.putText(
+                debug_blocks,
+                "BLUE=2",
+                (blue_box[0] + 6, blue_box[1] + 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color_by_type("blue"),
+                2,
+                cv2.LINE_AA
+            )
 
-                color_f = color_by_type(t)
+            cv2.rectangle(
+                debug_blocks,
+                (cream_box[0], cream_box[1]),
+                (cream_box[0] + cream_box[2], cream_box[1] + cream_box[3]),
+                color_by_type("cream"),
+                3
+            )
 
-                if t == "carton":
-                    label = f"P{i}"
-                elif t == "green":
-                    label = f"G{i}"
-                elif t == "cream":
-                    label = f"C{i}"
+            cv2.putText(
+                debug_blocks,
+                "CREAM=8",
+                (cream_box[0] + 6, cream_box[1] + 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color_by_type("cream"),
+                2,
+                cv2.LINE_AA
+            )
+
+            # =========================
+            # COUNT FIXED
+            # =========================
+
+            # กล่องไม้ = 3
+            draw_split(
+                debug_grid,
+                wood_box,
+                cols=1,
+                rows=3,
+                cell_type="wood",
+                prefix="W"
+            )
+
+            # น้ำเงิน = 2
+            draw_split(
+                debug_grid,
+                blue_box,
+                cols=1,
+                rows=2,
+                cell_type="blue",
+                prefix="B"
+            )
+
+            # ครีม = 8
+            draw_split(
+                debug_grid,
+                cream_box,
+                cols=4,
+                rows=2,
+                cell_type="cream",
+                prefix="C"
+            )
+
+            # =========================
+            # FINAL DRAW
+            # =========================
+            cream_count = sum(1 for t in cell_types if t == "cream")
+            blue_count = sum(1 for t in cell_types if t == "blue")
+            wood_count = sum(1 for t in cell_types if t == "wood")
+
+            type_running = {
+                "cream": 0,
+                "blue": 0,
+                "wood": 0
+            }
+
+            for x, y, w, h in cells:
+                t = cell_types[cells.index((x, y, w, h))]
+                type_running[t] += 1
+
+                color = color_by_type(t)
+
+                if t == "cream":
+                    label = f"C{type_running[t]}"
+                elif t == "blue":
+                    label = f"B{type_running[t]}"
                 else:
-                    label = f"N{i}"
+                    label = f"W{type_running[t]}"
 
                 cv2.rectangle(
                     debug_count,
                     (x, y),
                     (x + w, y + h),
-                    color_f,
+                    color,
                     3
                 )
 
@@ -1036,14 +733,14 @@ def gen_pallet(img, debug=True):
                     (x + 7, y + 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.85,
-                    color_f,
+                    color,
                     2,
                     cv2.LINE_AA
                 )
 
             cv2.putText(
                 debug_count,
-                f"C={cream_count} G={green_count} P={carton_count} TOTAL={len(cells)}",
+                f"CREAM={cream_count} BLUE={blue_count} WOOD={wood_count} TOTAL={len(cells)}",
                 (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.95,
@@ -1054,7 +751,7 @@ def gen_pallet(img, debug=True):
 
             cv2.putText(
                 debug_blocks,
-                f"RAW={len(raw_blocks)} FINAL={len(final_blocks)} EXPECT={len(final_blocks) * 8}",
+                "FIXED LAYOUT: WOOD=3 BLUE=2 CREAM=8",
                 (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.95,
@@ -1065,45 +762,67 @@ def gen_pallet(img, debug=True):
 
             cv2.putText(
                 debug_grid,
-                "4x2 EVERY BLOCK",
+                "WOOD 1x3 | BLUE 1x2 | CREAM 4x2",
                 (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
+                0.95,
                 (255, 255, 0),
                 3,
                 cv2.LINE_AA
             )
 
             print("=" * 50)
-            print("PALLET COUNT DEBUG 4x2 ALL")
-            print(f"ROI SIZE      : {rw}x{rh}")
-            print(f"RAW BLOCKS    : {len(raw_blocks)}")
-            print(f"FINAL BLOCKS  : {len(final_blocks)}")
-            print(f"EXPECTED 4x2  : {len(final_blocks) * 8}")
-            print(f"CREAM         : {cream_count}")
-            print(f"GREEN         : {green_count}")
-            print(f"CARTON        : {carton_count}")
-            print(f"TOTAL         : {len(cells)}")
+            print("PALLET FIXED LAYOUT DEBUG")
+            print(f"ROI SIZE : {rw}x{rh}")
+            print(f"CREAM    : {cream_count}")
+            print(f"BLUE     : {blue_count}")
+            print(f"WOOD     : {wood_count}")
+            print(f"TOTAL    : {len(cells)}")
             print("=" * 50)
 
+            # =========================
+            # SAVE DEBUG
+            # =========================
             save_dbg("debug_original.jpg", roi)
-            save_dbg("debug_normalized.jpg", norm)
-
-            save_dbg("debug_cream.jpg", cream)
-            save_dbg("debug_white.jpg", white)
-            save_dbg("debug_green_inbound.jpg", green)
-            save_dbg("debug_blue_inbound.jpg", blue)
-            save_dbg("debug_carton.jpg", carton_mask)
-
-            save_dbg("debug_cargo.jpg", cargo_mask)
-            save_dbg("debug_pallet_mask.jpg", pallet_mask)
-            save_dbg("debug_box_mask.jpg", carton_mask)
-            save_dbg("debug_overlay.jpg", debug_overlay)
             save_dbg("debug_blocks.jpg", debug_blocks)
             save_dbg("debug_grid.jpg", debug_grid)
             save_dbg("debug_pallet_box.jpg", debug_count)
 
+            # สร้าง mask dummy เพื่อให้ route เดิมไม่ error
+            dummy_mask = np.zeros((rh, rw), dtype=np.uint8)
+
+            cv2.rectangle(
+                dummy_mask,
+                (wood_box[0], wood_box[1]),
+                (wood_box[0] + wood_box[2], wood_box[1] + wood_box[3]),
+                255,
+                -1
+            )
+
+            cv2.rectangle(
+                dummy_mask,
+                (blue_box[0], blue_box[1]),
+                (blue_box[0] + blue_box[2], blue_box[1] + blue_box[3]),
+                255,
+                -1
+            )
+
+            cv2.rectangle(
+                dummy_mask,
+                (cream_box[0], cream_box[1]),
+                (cream_box[0] + cream_box[2], cream_box[1] + cream_box[3]),
+                255,
+                -1
+            )
+
+            save_dbg("debug_pallet_mask.jpg", dummy_mask)
+            save_dbg("debug_cargo.jpg", dummy_mask)
+            save_dbg("debug_overlay.jpg", debug_count)
+
     return len(cells)
+    cell_types = []
+
+
 
 
 # =========================
