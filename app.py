@@ -109,28 +109,29 @@ def gen_pallet(img, debug=True):
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
     # =========================
-    # GREEN MASK
+    # COLOR MASKS
     # =========================
     green_mask = cv2.inRange(hsv, (30,30,30), (90,255,255))
+    blue_mask  = cv2.inRange(hsv, (90,40,40), (130,255,255))
 
-    green_mask = cv2.morphologyEx(
-        green_mask,
-        cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_RECT,(5,5)),
-        1
-    )
+    cream1 = cv2.inRange(hsv, (5,10,120), (40,120,255))
+    cream2 = cv2.inRange(hsv, (0,0,180), (180,50,255))
+    cream_mask = cv2.bitwise_or(cream1, cream2)
+
+    # clean
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(5,5))
+    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN, kernel, 1)
 
     # =========================
-    # EDGE
+    # EDGE (ช่วย structure)
     # =========================
     edges = cv2.Canny(gray, 50, 150)
-
     combine = cv2.bitwise_or(green_mask, edges)
 
     debug_img = roi.copy()
 
     # =========================
-    # SPLIT X
+    # STEP 1: SPLIT X
     # =========================
     col_sum = np.sum(combine > 0, axis=0)
     col_th  = np.max(col_sum) * 0.35
@@ -148,6 +149,7 @@ def gen_pallet(img, debug=True):
             end = i
             width = end - start
 
+            # force split block ใหญ่
             if width > rw * 0.22:
                 mid = (start + end)//2
                 x_blocks.append((start, mid))
@@ -161,21 +163,20 @@ def gen_pallet(img, debug=True):
         x_blocks.append((start, len(col_sum)-1))
 
     # =========================
-    # REMOVE GAP + FILTER WIDTH
+    # FILTER GAP + WIDTH
     # =========================
     filtered = []
 
     for (x1,x2) in x_blocks:
+
+        width = x2 - x1
         block = green_mask[:, x1:x2]
 
         density = np.sum(block > 0) / (block.size + 1e-6)
-        width = x2 - x1
 
-        # ❌ ตัดช่องว่าง
         if density < 0.05:
             continue
 
-        # ✅ ✅ ✅ ตัด block แคบ (สำคัญสุด)
         if width < rw * 0.08:
             continue
 
@@ -183,11 +184,80 @@ def gen_pallet(img, debug=True):
 
     x_blocks = filtered
 
-    pallet_count = 0
+    # =========================
+    # SPLIT LARGE BLOCK (สำคัญ)
+    # =========================
+    def split_large(mask, x1, x2):
+        sub = mask[:, x1:x2]
+
+        col_sum = np.sum(sub > 0, axis=0)
+        th = np.max(col_sum) * 0.30
+
+        splits = []
+        in_block = False
+
+        for i in range(len(col_sum)):
+
+            if col_sum[i] > th and not in_block:
+                sx = i
+                in_block = True
+
+            elif col_sum[i] <= th and in_block:
+                ex = i
+
+                if (ex - sx) > rw*0.06:
+                    splits.append((x1+sx, x1+ex))
+
+                in_block = False
+
+        if in_block:
+            if (len(col_sum)-sx) > rw*0.06:
+                splits.append((x1+sx, x2))
+
+        return splits
+
+    final_blocks = []
+
+    for (x1,x2) in x_blocks:
+        if (x2-x1) > rw * 0.18:
+            final_blocks.extend(split_large(green_mask, x1, x2))
+        else:
+            final_blocks.append((x1,x2))
+
+    x_blocks = final_blocks
 
     # =========================
-    # SPLIT Y
+    # CLASSIFY FUNCTION
     # =========================
+    def classify_block(x1,x2,y1,y2):
+
+        area = (x2-x1)*(y2-y1)
+
+        g = np.count_nonzero(green_mask[y1:y2, x1:x2]) / (area+1e-6)
+        b = np.count_nonzero(blue_mask[y1:y2, x1:x2]) / (area+1e-6)
+        c = np.count_nonzero(cream_mask[y1:y2, x1:x2]) / (area+1e-6)
+
+        if g > 0.15:
+            return "green"
+        elif b > 0.10:
+            return "blue"
+        elif c > 0.20:
+            return "cream"
+        else:
+            return "unknown"
+
+    # =========================
+    # COUNT
+    # =========================
+    pallet_count = 0
+
+    counts = {
+        "green":0,
+        "blue":0,
+        "cream":0,
+        "unknown":0
+    }
+
     for (x1,x2) in x_blocks:
 
         sub = green_mask[:, x1:x2]
@@ -208,63 +278,70 @@ def gen_pallet(img, debug=True):
                 ey = j
                 height = ey - sy
 
-                # ✅ กัน block เตี้ยเกิน
                 if height > rh * 0.12:
+
+                    t = classify_block(x1,x2,sy,ey)
+
                     pallet_count += 1
+                    counts[t] += 1
 
-                    cv2.rectangle(
-                        debug_img,
-                        (x1, sy),
-                        (x2, ey),
-                        (0,255,0),
-                        3
-                    )
+                    cv2.rectangle(debug_img,
+                                  (x1, sy),
+                                  (x2, ey),
+                                  (0,255,0),3)
 
-                    cv2.putText(
-                        debug_img,
-                        f"P{pallet_count}",
-                        (x1+5, sy+30),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8,
-                        (0,255,0),
-                        2
-                    )
+                    cv2.putText(debug_img,
+                                f"{t[0].upper()}{counts[t]}",
+                                (x1+5, sy+30),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.8,
+                                (0,255,0),2)
 
                 in_row = False
 
         if in_row:
-            if (len(row_sum)-sy) > rh*0.12:
-                pallet_count += 1
+            if (len(row_sum)-sy) > rh * 0.12:
 
-                cv2.rectangle(
-                    debug_img,
-                    (x1, sy),
-                    (x2, len(row_sum)),
-                    (0,255,0),
-                    3
-                )
+                t = classify_block(x1,x2,sy,len(row_sum))
+
+                pallet_count += 1
+                counts[t] += 1
+
+                cv2.rectangle(debug_img,
+                              (x1, sy),
+                              (x2, len(row_sum)),
+                              (0,255,0),3)
 
     # =========================
     # RESULT
     # =========================
-    cv2.putText(
-        debug_img,
-        f"PALLET={pallet_count}",
-        (20,40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1,
-        (0,255,255),
-        3
-    )
+    cv2.putText(debug_img,
+                f"T={pallet_count} G={counts['green']} B={counts['blue']} C={counts['cream']}",
+                (20,40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0,255,255),
+                3)
 
-    print("FINAL PALLET =", pallet_count)
+    print("="*50)
+    print("FINAL RESULT")
+    print("TOTAL:", pallet_count)
+    print("GREEN:", counts["green"])
+    print("BLUE :", counts["blue"])
+    print("CREAM:", counts["cream"])
+    print("="*50)
 
     if debug:
         save_debug("debug_green_mask.jpg", green_mask)
         save_debug("debug_edges.jpg", edges)
         save_debug("debug_pallet_box.jpg", debug_img)
 
-    return pallet_count
+    return {
+        "total": pallet_count,
+        "green": counts["green"],
+        "blue": counts["blue"],
+        "cream": counts["cream"]
+    }
 
 
 
