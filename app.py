@@ -3,7 +3,6 @@ import requests
 import cv2
 import numpy as np
 import traceback
-import time
 import threading
 import os
 
@@ -12,6 +11,7 @@ app = Flask(__name__)
 
 # =========================
 # APPSHEET CONFIG
+# แนะนำให้ตั้งใน Render Environment Variables
 # =========================
 APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
 ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
@@ -42,7 +42,7 @@ def download_image(url):
             timeout=15,
             allow_redirects=True,
             headers={
-                "User-At": "Mozilla/5.0"
+                "User-Agent": "Mozilla/5.0"
             }
         )
 
@@ -67,13 +67,27 @@ def download_image(url):
 # =========================
 def save_debug(filename, img):
     try:
+        if img is None:
+            print("SAVE DEBUG ERROR:", filename, "image is None")
+            return False
+
         path = os.path.join(DEBUG_DIR, filename)
+
         ok = cv2.imwrite(path, img)
-        print(f"SAVE DEBUG {filename}: {ok}")
+
+        exists = os.path.exists(path)
+        size = os.path.getsize(path) if exists else 0
+
+        print(
+            f"SAVE DEBUG {filename}: "
+            f"ok={ok} exists={exists} size={size} path={path}"
+        )
+
         return ok
 
     except Exception as e:
         print("SAVE DEBUG ERROR:", filename, e)
+        print(traceback.format_exc())
         return False
 
 
@@ -90,7 +104,6 @@ def clean_mask(mask, min_area_ratio=0.002):
     )
 
     result = np.zeros_like(mask)
-
     min_area = int(mask.size * min_area_ratio)
 
     for i in range(1, num_labels):
@@ -102,30 +115,19 @@ def clean_mask(mask, min_area_ratio=0.002):
     return result
 
 
-
 # =========================
-# BALANCED VOLUME MODEL
+# VOLUME MODEL - OUTBOUND
 # =========================
 def gen_volume(img, debug=True, return_empty=False):
 
     if img is None or img.size == 0:
         return 0
 
-    # =========================
-    # DETECT VIEW TYPE
-    # =========================
     orig_h, orig_w = img.shape[:2]
     view_type = "rear" if orig_h > orig_w else "side"
 
-    # =========================
-    # RESIZE
-    # =========================
     img = cv2.resize(img, (640, 480))
 
-    # =========================
-    # SIDE VIEW
-    # 4:3 -> 16:9
-    # =========================
     if view_type == "side":
         h, w = img.shape[:2]
         target_h = int(w * 9 / 16)
@@ -134,14 +136,6 @@ def gen_volume(img, debug=True, return_empty=False):
 
     h, w = img.shape[:2]
 
-    print(
-        f"VIEW={view_type} "
-        f"SIZE={w}x{h}"
-    )
-
-    # =========================
-    # ROI
-    # =========================
     if view_type == "rear":
         roi = img[
             int(h * 0.18):int(h * 0.82),
@@ -158,117 +152,44 @@ def gen_volume(img, debug=True, return_empty=False):
 
     rh, rw = roi.shape[:2]
 
-    # =========================
-    # CONTAINER MASK
-    # ใช้ ROI ทั้งหมดเป็นพื้นที่ภายในตู้
-    # =========================
     container_mask = np.full(
         (rh, rw),
         255,
         dtype=np.uint8
     )
 
-    # =========================
-    # LIGHT NORMALIZATION
-    # =========================
-    lab = cv2.cvtColor(
-        roi,
-        cv2.COLOR_BGR2LAB
-    )
-
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
 
-    clahe = cv2.createCLAHE(
+    l = cv2.createCLAHE(
         clipLimit=2.0,
         tileGridSize=(8, 8)
-    )
-
-    l = clahe.apply(l)
+    ).apply(l)
 
     roi_norm = cv2.cvtColor(
         cv2.merge((l, a, b)),
         cv2.COLOR_LAB2BGR
     )
 
-    # =========================
-    # COLOR SPACE
-    # =========================
-    hsv = cv2.cvtColor(
-        roi_norm,
-        cv2.COLOR_BGR2HSV
-    )
-
-    gray = cv2.cvtColor(
-        roi_norm,
-        cv2.COLOR_BGR2GRAY
-    )
-
-    gray_blur = cv2.GaussianBlur(
-        gray,
-        (5, 5),
-        0
-    )
+    hsv = cv2.cvtColor(roi_norm, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(roi_norm, cv2.COLOR_BGR2GRAY)
+    gray_blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
     h_channel, s_channel, v_channel = cv2.split(hsv)
 
     v_mean = float(v_channel.mean())
     s_mean = float(s_channel.mean())
 
-    # =========================
-    # CARGO COLOR MASKS
-    # =========================
+    green_mask = cv2.inRange(hsv, (35, 45, 45), (95, 255, 255))
+    brown_mask = cv2.inRange(hsv, (5, 45, 45), (35, 255, 230))
+    blue_mask = cv2.inRange(hsv, (85, 35, 35), (125, 255, 255))
 
-    # GREEN PALLET / GREEN OBJECT
-    green_mask = cv2.inRange(
-        hsv,
-        (35, 45, 45),
-        (95, 255, 255)
-    )
+    red_mask_1 = cv2.inRange(hsv, (0, 60, 50), (12, 255, 255))
+    red_mask_2 = cv2.inRange(hsv, (165, 60, 50), (180, 255, 255))
+    red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
 
-    # BROWN CARTON / WOOD / PALLET
-    brown_mask = cv2.inRange(
-        hsv,
-        (5, 45, 45),
-        (35, 255, 230)
-    )
+    dark_mask = cv2.inRange(hsv, (0, 55, 0), (180, 255, 65))
 
-    # BLUE / CYAN CRATE
-    blue_mask = cv2.inRange(
-        hsv,
-        (85, 35, 35),
-        (125, 255, 255)
-    )
-
-    # RED CRATE / RED CARGO
-    # สีแดงใน HSV ต้องแยก 2 ช่วง เพราะ Hue อยู่ทั้งต้นและท้ายวงสี
-    red_mask_1 = cv2.inRange(
-        hsv,
-        (0, 60, 50),
-        (12, 255, 255)
-    )
-
-    red_mask_2 = cv2.inRange(
-        hsv,
-        (165, 60, 50),
-        (180, 255, 255)
-    )
-
-    red_mask = cv2.bitwise_or(
-        red_mask_1,
-        red_mask_2
-    )
-
-    # DARK CARGO
-    # ปรับเข้มขึ้นเพื่อลดการจับเงา / ผ้า / พื้นมืด
-    dark_mask = cv2.inRange(
-        hsv,
-        (0, 55, 0),
-        (180, 255, 65)
-    )
-
-    # =========================
-    # TEXTURE MASK - CONSERVATIVE
-    # =========================
     adaptive_texture = cv2.adaptiveThreshold(
         gray_blur,
         255,
@@ -278,18 +199,8 @@ def gen_volume(img, debug=True, return_empty=False):
         7
     )
 
-    # ใช้ AND แทน OR เพื่อลดการจับผนัง / ผ้า / เพดาน
-    strong_saturation_mask = cv2.inRange(
-        s_channel,
-        70,
-        255
-    )
-
-    strong_low_value_mask = cv2.inRange(
-        v_channel,
-        0,
-        75
-    )
+    strong_saturation_mask = cv2.inRange(s_channel, 70, 255)
+    strong_low_value_mask = cv2.inRange(v_channel, 0, 75)
 
     texture_candidate = cv2.bitwise_and(
         strong_saturation_mask,
@@ -301,37 +212,20 @@ def gen_volume(img, debug=True, return_empty=False):
         texture_candidate
     )
 
-    # =========================
-    # EDGE DENSITY FILTER
-    # ลด false positive จากผ้า / ผิวเรียบ / เพดาน
-    # =========================
-    edges = cv2.Canny(
-        gray_blur,
-        40,
-        120
-    )
+    edges = cv2.Canny(gray_blur, 40, 120)
 
     edge_density = cv2.blur(
         edges.astype(np.float32),
         (15, 15)
     )
 
-    edge_mask = cv2.inRange(
-        edge_density,
-        10,
-        255
-    )
+    edge_mask = cv2.inRange(edge_density, 10, 255)
 
     texture_mask = cv2.bitwise_and(
         texture_mask,
         edge_mask
     )
 
-    # =========================
-    # TOP FALSE POSITIVE SUPPRESSION
-    # ไม่ตัด color cargo ด้านบนทั้งหมด เพราะบางภาพมีกล่องจริงอยู่ด้านบน
-    # ตัดเฉพาะ texture/dark ที่มักติดเพดานหรือผ้า
-    # =========================
     top_suppress_mask = np.full(
         (rh, rw),
         255,
@@ -343,64 +237,19 @@ def gen_volume(img, debug=True, return_empty=False):
 
     top_suppress_mask[:top_cut, :] = 0
 
-    texture_mask = cv2.bitwise_and(
-        texture_mask,
-        top_suppress_mask
-    )
+    texture_mask = cv2.bitwise_and(texture_mask, top_suppress_mask)
+    dark_mask = cv2.bitwise_and(dark_mask, top_suppress_mask)
 
-    dark_mask = cv2.bitwise_and(
-        dark_mask,
-        top_suppress_mask
-    )
+    color_cargo_mask = cv2.bitwise_or(green_mask, brown_mask)
+    color_cargo_mask = cv2.bitwise_or(color_cargo_mask, blue_mask)
+    color_cargo_mask = cv2.bitwise_or(color_cargo_mask, red_mask)
 
-    # =========================
-    # COMBINE COLOR MASKS
-    # =========================
-    color_cargo_mask = cv2.bitwise_or(
-        green_mask,
-        brown_mask
-    )
+    cargo_mask = cv2.bitwise_or(color_cargo_mask, dark_mask)
+    cargo_mask = cv2.bitwise_or(cargo_mask, texture_mask)
+    cargo_mask = cv2.bitwise_and(cargo_mask, container_mask)
 
-    color_cargo_mask = cv2.bitwise_or(
-        color_cargo_mask,
-        blue_mask
-    )
-
-    color_cargo_mask = cv2.bitwise_or(
-        color_cargo_mask,
-        red_mask
-    )
-
-    # =========================
-    # COMBINE CARGO
-    # =========================
-    cargo_mask = cv2.bitwise_or(
-        color_cargo_mask,
-        dark_mask
-    )
-
-    cargo_mask = cv2.bitwise_or(
-        cargo_mask,
-        texture_mask
-    )
-
-    cargo_mask = cv2.bitwise_and(
-        cargo_mask,
-        container_mask
-    )
-
-    # =========================
-    # MORPHOLOGY
-    # =========================
-    kernel_small = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (5, 5)
-    )
-
-    kernel_medium = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (9, 9)
-    )
+    kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    kernel_medium = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
 
     cargo_mask = cv2.morphologyEx(
         cargo_mask,
@@ -416,16 +265,11 @@ def gen_volume(img, debug=True, return_empty=False):
         iterations=1
     )
 
-    # ลด noise จุดเล็ก
     cargo_mask = clean_mask(
         cargo_mask,
         min_area_ratio=0.005
     )
 
-    # =========================
-    # CONTOUR FILTER
-    # กรอง noise เล็ก ๆ และ shape ที่ไม่น่าเป็น cargo
-    # =========================
     contours, _ = cv2.findContours(
         cargo_mask,
         cv2.RETR_EXTERNAL,
@@ -433,7 +277,6 @@ def gen_volume(img, debug=True, return_empty=False):
     )
 
     filtered_mask = np.zeros_like(cargo_mask)
-
     min_contour_area = rh * rw * 0.0035
 
     for cnt in contours:
@@ -449,7 +292,6 @@ def gen_volume(img, debug=True, return_empty=False):
 
         aspect_ratio = w_box / float(h_box)
 
-        # ช่วงกว้างขึ้นเพื่อไม่ตัดกล่องที่เรียงยาวหลายใบ
         if 0.20 <= aspect_ratio <= 6.50:
             cv2.drawContours(
                 filtered_mask,
@@ -461,25 +303,14 @@ def gen_volume(img, debug=True, return_empty=False):
 
     cargo_mask = filtered_mask
 
-    # =========================
-    # FALLBACK ถ้า cargo กินภาพเยอะผิดปกติ
-    # =========================
     raw_cargo_ratio = cv2.countNonZero(cargo_mask) / float(container_mask.size)
 
     if raw_cargo_ratio > 0.95:
         print("WARNING: cargo over-detected, fallback to color only")
 
         cargo_mask = color_cargo_mask.copy()
-
-        cargo_mask = cv2.bitwise_or(
-            cargo_mask,
-            dark_mask
-        )
-
-        cargo_mask = cv2.bitwise_and(
-            cargo_mask,
-            container_mask
-        )
+        cargo_mask = cv2.bitwise_or(cargo_mask, dark_mask)
+        cargo_mask = cv2.bitwise_and(cargo_mask, container_mask)
 
         cargo_mask = cv2.morphologyEx(
             cargo_mask,
@@ -502,23 +333,12 @@ def gen_volume(img, debug=True, return_empty=False):
 
         raw_cargo_ratio = cv2.countNonZero(cargo_mask) / float(container_mask.size)
 
-    # =========================
-    # EMPTY MASK = CONTAINER - CARGO
-    # =========================
     empty_mask = cv2.bitwise_and(
         container_mask,
         cv2.bitwise_not(cargo_mask)
     )
 
-    # =========================
-    # PERSPECTIVE WEIGHT
-    # =========================
-    y = np.linspace(
-        0,
-        1,
-        rh,
-        dtype=np.float32
-    ).reshape(rh, 1)
+    y = np.linspace(0, 1, rh, dtype=np.float32).reshape(rh, 1)
 
     if view_type == "rear":
         weights = 0.70 + (y ** 1.5) * 1.30
@@ -543,43 +363,16 @@ def gen_volume(img, debug=True, return_empty=False):
     filled_ratio = cargo_score / container_score
     empty_ratio = empty_score / container_score
 
-    filled_ratio = float(
-        np.clip(
-            filled_ratio,
-            0,
-            1
-        )
-    )
+    filled_ratio = float(np.clip(filled_ratio, 0, 1))
+    empty_ratio = float(np.clip(empty_ratio, 0, 1))
 
-    empty_ratio = float(
-        np.clip(
-            empty_ratio,
-            0,
-            1
-        )
-    )
-
-    # =========================
-    # CALIBRATION
-    # =========================
     filled_volume = (filled_ratio ** 0.95) * 100
     filled_volume = filled_volume * 0.95
-
-    filled_volume = float(
-        np.clip(
-            filled_volume,
-            0,
-            100
-        )
-    )
+    filled_volume = float(np.clip(filled_volume, 0, 100))
 
     empty_volume = 100 - filled_volume
 
-    if return_empty:
-        output_volume = empty_volume
-    else:
-        output_volume = filled_volume
-
+    output_volume = empty_volume if return_empty else filled_volume
     output_volume = int(round(output_volume / 5) * 5)
     output_volume = max(0, min(100, output_volume))
 
@@ -594,27 +387,11 @@ def gen_volume(img, debug=True, return_empty=False):
         f"MODE={'EMPTY' if return_empty else 'FILLED'}"
     )
 
-    # =========================
-    # DEBUG OUTPUT
-    # =========================
     if debug:
-
         color_layer = roi_norm.copy()
 
-        # GREEN = cargo
-        color_layer[cargo_mask > 0] = (
-            0,
-            255,
-            0
-        )
-
-        # BLUE = empty
-        # เปลี่ยนจากสีแดงเป็นสีน้ำเงิน เพื่อไม่ให้กลืนกับลังแดงจริง
-        color_layer[empty_mask > 0] = (
-            255,
-            0,
-            0
-        )
+        color_layer[cargo_mask > 0] = (0, 255, 0)
+        color_layer[empty_mask > 0] = (255, 0, 0)
 
         overlay = cv2.addWeighted(
             roi_norm,
@@ -630,7 +407,12 @@ def gen_volume(img, debug=True, return_empty=False):
             cv2.CHAIN_APPROX_SIMPLE
         )
 
-        # YELLOW contour = cargo
+        empty_contours, _ = cv2.findContours(
+            empty_mask,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+
         cv2.drawContours(
             overlay,
             cargo_contours,
@@ -639,13 +421,6 @@ def gen_volume(img, debug=True, return_empty=False):
             2
         )
 
-        empty_contours, _ = cv2.findContours(
-            empty_mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        # BLUE contour = empty
         cv2.drawContours(
             overlay,
             empty_contours,
@@ -698,6 +473,10 @@ def gen_volume(img, debug=True, return_empty=False):
     return output_volume
 
 
+# =========================
+# PALLET MODEL - INBOUND
+# ใช้ 4x2 สำหรับทุกสี / ทุก block
+# =========================
 def gen_pallet(img, debug=True):
     cells = []
     cell_types = []
@@ -705,10 +484,7 @@ def gen_pallet(img, debug=True):
     def save_dbg(name, im):
         if not debug or im is None:
             return
-        try:
-            save_debug(name, im)
-        except Exception:
-            cv2.imwrite(os.path.join(DEBUG_DIR, name), im)
+        save_debug(name, im)
 
     def clean(mask, k=5, it=1):
         if mask is None or mask.size == 0:
@@ -760,42 +536,10 @@ def gen_pallet(img, debug=True):
             uy2 - uy
         )
 
-    def nms_with_types(boxes, types, dist=0.05):
-        out_boxes = []
-        out_types = []
-
-        for i, b in enumerate(boxes):
-            x, y, w, h = b
-            cx = x + w / 2.0
-            cy = y + h / 2.0
-
-            duplicate = False
-
-            for ob in out_boxes:
-                ox, oy, ow, oh = ob
-                ocx = ox + ow / 2.0
-                ocy = oy + oh / 2.0
-
-                if (
-                    abs(cx - ocx) < min(w, ow) * dist and
-                    abs(cy - ocy) < min(h, oh) * dist
-                ):
-                    duplicate = True
-                    break
-
-            if not duplicate:
-                out_boxes.append(b)
-
-                if i < len(types):
-                    out_types.append(types[i])
-                else:
-                    out_types.append("pallet")
-
-        return out_boxes, out_types
-
     def draw_grid(draw, x, y, w, h, cols=4, rows=2):
         for c in range(cols + 1):
             gx = x + int(c * w / cols)
+
             cv2.line(
                 draw,
                 (gx, y),
@@ -806,6 +550,7 @@ def gen_pallet(img, debug=True):
 
         for r in range(rows + 1):
             gy = y + int(r * h / rows)
+
             cv2.line(
                 draw,
                 (x, gy),
@@ -843,6 +588,7 @@ def gen_pallet(img, debug=True):
         cols = 4
         rows = 2
         count = 0
+        color = color_by_type(cell_type)
 
         draw_grid(
             draw,
@@ -853,8 +599,6 @@ def gen_pallet(img, debug=True):
             cols,
             rows
         )
-
-        color = color_by_type(cell_type)
 
         for r in range(rows):
             for c in range(cols):
@@ -886,69 +630,6 @@ def gen_pallet(img, debug=True):
 
         return count
 
-    def force_layout_count(raw_blocks, draw):
-        forced_cells = []
-        forced_types = []
-
-        if len(raw_blocks) == 0:
-            return forced_cells, forced_types
-
-        sorted_blocks = sorted(
-            raw_blocks,
-            key=lambda b: b[0]
-        )
-
-        for idx, box in enumerate(sorted_blocks):
-            x, y, w, h = box
-
-            if w <= 0 or h <= 0:
-                continue
-
-            if idx == 0:
-                cell_type = "carton"
-            elif idx == 1:
-                cell_type = "green"
-            else:
-                cell_type = "cream"
-
-            cols = 4
-            rows = 2
-
-            draw_grid(
-                draw,
-                x,
-                y,
-                w,
-                h,
-                cols,
-                rows
-            )
-
-            color = color_by_type(cell_type)
-
-            for r in range(rows):
-                for c in range(cols):
-                    x1 = x + int(c * w / cols)
-                    x2 = x + int((c + 1) * w / cols)
-                    y1 = y + int(r * h / rows)
-                    y2 = y + int((r + 1) * h / rows)
-
-                    forced_cells.append(
-                        (x1, y1, x2 - x1, y2 - y1)
-                    )
-
-                    forced_types.append(cell_type)
-
-                    cv2.rectangle(
-                        draw,
-                        (x1, y1),
-                        (x2, y2),
-                        color,
-                        1
-                    )
-
-        return forced_cells, forced_types
-
     if img is not None and img.size > 0:
         img = cv2.resize(
             img,
@@ -957,7 +638,6 @@ def gen_pallet(img, debug=True):
 
         H, W = img.shape[:2]
 
-        # ROI ใช้ตามที่ตรวจแล้วว่าใช้ได้
         roi = img[
             int(H * 0.17):int(H * 0.84),
             int(W * 0.01):int(W * 0.99)
@@ -966,9 +646,6 @@ def gen_pallet(img, debug=True):
         if roi.size > 0:
             rh, rw = roi.shape[:2]
 
-            # =========================
-            # LIGHT NORMALIZATION
-            # =========================
             lab = cv2.cvtColor(
                 roi,
                 cv2.COLOR_BGR2LAB
@@ -998,9 +675,6 @@ def gen_pallet(img, debug=True):
                 cv2.COLOR_BGR2GRAY
             )
 
-            # =========================
-            # COLOR MASKS
-            # =========================
             cream = cv2.inRange(
                 hsv,
                 (8, 18, 70),
@@ -1031,9 +705,6 @@ def gen_pallet(img, debug=True):
                 (38, 200, 250)
             )
 
-            # =========================
-            # CUT ROOF / BOTTOM / EDGES
-            # =========================
             for m in [cream, white, green, blue, carton]:
                 m[:int(rh * 0.13), :] = 0
                 m[int(rh * 0.88):, :] = 0
@@ -1046,9 +717,6 @@ def gen_pallet(img, debug=True):
             blue = clean(blue, 3, 1)
             carton_mask = clean(carton, 5, 1)
 
-            # =========================
-            # BUILD PALLET MASK
-            # =========================
             frame_mask = cv2.bitwise_or(
                 cream,
                 white
@@ -1129,9 +797,6 @@ def gen_pallet(img, debug=True):
                 iterations=1
             )
 
-            # =========================
-            # DEBUG CANVAS
-            # =========================
             debug_blocks = roi.copy()
             debug_grid = roi.copy()
             debug_count = roi.copy()
@@ -1148,9 +813,6 @@ def gen_pallet(img, debug=True):
                 0
             )
 
-            # =========================
-            # FIND RAW BLOCKS
-            # =========================
             cnts, _ = cv2.findContours(
                 cargo_mask,
                 cv2.RETR_EXTERNAL,
@@ -1176,7 +838,6 @@ def gen_pallet(img, debug=True):
                     (x, y, w, h)
                 )
 
-            # fallback ถ้า contour ไม่เจอ
             if len(raw_blocks) == 0:
                 ys, xs = np.where(pallet_mask > 0)
 
@@ -1201,9 +862,6 @@ def gen_pallet(img, debug=True):
                 key=lambda b: (b[1], b[0])
             )
 
-            # =========================
-            # DRAW RAW BLOCKS
-            # =========================
             for i, (x, y, w, h) in enumerate(raw_blocks, 1):
                 cv2.rectangle(
                     debug_blocks,
@@ -1224,9 +882,6 @@ def gen_pallet(img, debug=True):
                     cv2.LINE_AA
                 )
 
-            # =========================
-            # CLASSIFY BLOCKS
-            # =========================
             carton_blocks = []
             green_blocks = []
             cream_blocks = []
@@ -1290,7 +945,6 @@ def gen_pallet(img, debug=True):
                     ("cream", cream_box)
                 )
 
-            # ถ้า classify ไม่ได้ แต่มี raw block ให้ใช้ raw block แทน
             if len(final_blocks) == 0 and len(raw_blocks) > 0:
                 sorted_by_x = sorted(
                     raw_blocks,
@@ -1309,9 +963,6 @@ def gen_pallet(img, debug=True):
                         (t, box)
                     )
 
-            # =========================
-            # DRAW FINAL BLOCKS
-            # =========================
             for i, (block_type, box) in enumerate(final_blocks, 1):
                 x, y, w, h = box
                 color_b = color_by_type(block_type)
@@ -1335,43 +986,12 @@ def gen_pallet(img, debug=True):
                     cv2.LINE_AA
                 )
 
-            # =========================
-            # COUNT 4x2 FOR EVERY BLOCK
-            # =========================
             for block_type, box in final_blocks:
                 split_4x2(
                     box,
                     block_type,
                     debug_grid
                 )
-
-            # =========================
-            # FORCE FALLBACK
-            # ถ้ายังนับได้น้อย ให้แตก raw_blocks เป็น 4x2 ทุก block
-            # =========================
-            if len(cells) <= 3:
-                print("WARNING: LOW COUNT, FORCE 4x2 RAW BLOCK SPLIT")
-
-                cells = []
-                cell_types = []
-
-                forced_cells, forced_types = force_layout_count(
-                    raw_blocks,
-                    debug_grid
-                )
-
-                cells.extend(forced_cells)
-                cell_types.extend(forced_types)
-
-            # =========================
-            # FINAL NMS
-            # ลดมาก เพื่อไม่ให้ลบช่องที่ติดกัน
-            # =========================
-            cells, cell_types = nms_with_types(
-                cells,
-                cell_types,
-                dist=0.05
-            )
 
             cream_count = sum(
                 1 for t in cell_types
@@ -1388,9 +1008,6 @@ def gen_pallet(img, debug=True):
                 if t == "carton"
             )
 
-            # =========================
-            # DRAW FINAL COUNT
-            # =========================
             for i, (x, y, w, h) in enumerate(cells, 1):
                 t = cell_types[i - 1] if i - 1 < len(cell_types) else "pallet"
 
@@ -1469,9 +1086,6 @@ def gen_pallet(img, debug=True):
             print(f"TOTAL         : {len(cells)}")
             print("=" * 50)
 
-            # =========================
-            # SAVE DEBUG
-            # =========================
             save_dbg("debug_original.jpg", roi)
             save_dbg("debug_normalized.jpg", norm)
 
@@ -1491,11 +1105,15 @@ def gen_pallet(img, debug=True):
 
     return len(cells)
 
-    
+
 # =========================
 # UPDATE APPSHEET
 # =========================
 def update_appsheet(row_id, volume_text):
+
+    if not APP_ID or not ACCESS_KEY:
+        print("APPSHEET SKIP: missing APP_ID or ACCESS_KEY")
+        return
 
     url = f"https://api.appsheet.com/api/v2/apps/{APP_ID}/tables/{TABLE_NAME}/Action"
 
@@ -1544,68 +1162,119 @@ def health():
 # =========================
 # DEBUG VIEW
 # =========================
-@app.route("/debug/<filename>", methods=["GET"])
+@app.route("/debug/<path:filename>", methods=["GET"])
 def debug_file(filename):
+    try:
+        filename = os.path.basename(filename)
 
-    allowed = {
-        "debug_original.jpg",
-        "debug_normalized.jpg",
-        "debug_container.jpg",
-        "debug_cargo.jpg",
-        "debug_empty.jpg",
-        "debug_overlay.jpg",
-        "debug_overlay_light.jpg",
-        "debug_overlay_contour.jpg",
-        "debug_green.jpg",
-        "debug_brown.jpg",
-        "debug_blue.jpg",
-        "debug_dark.jpg",
-        "debug_texture.jpg"
-    }
+        if not filename.startswith("debug_"):
+            return jsonify({
+                "error": "file not allowed",
+                "reason": "filename must start with debug_",
+                "filename": filename
+            }), 403
 
-    if filename not in allowed:
-        return jsonify({"error": "file not allowed"}), 403
+        if not filename.lower().endswith((".jpg", ".jpeg", ".png")):
+            return jsonify({
+                "error": "file not allowed",
+                "reason": "only jpg/jpeg/png allowed",
+                "filename": filename
+            }), 403
 
-    path = os.path.join(DEBUG_DIR, filename)
+        path = os.path.join(DEBUG_DIR, filename)
 
-    if not os.path.exists(path):
-        return jsonify({"error": "debug file not found"}), 404
+        if not os.path.exists(path):
+            return jsonify({
+                "error": "debug file not found",
+                "filename": filename,
+                "path": path,
+                "debug_dir": DEBUG_DIR,
+                "files_in_debug_dir": sorted(os.listdir(DEBUG_DIR))
+            }), 404
 
-    return send_file(path, mimetype="image/jpeg")
+        mimetype = "image/png" if filename.lower().endswith(".png") else "image/jpeg"
+
+        return send_file(
+            path,
+            mimetype=mimetype,
+            as_attachment=False,
+            max_age=0
+        )
+
+    except Exception as e:
+        print("DEBUG FILE ERROR:", e)
+        print(traceback.format_exc())
+
+        return jsonify({
+            "error": "debug server error",
+            "message": str(e)
+        }), 500
 
 
 @app.route("/debug-list", methods=["GET"])
 def debug_list():
+    try:
+        base_url = request.host_url.rstrip("/")
 
-    files = [
-        "debug_original.jpg",
-        "debug_normalized.jpg",
-        "debug_container.jpg",
-        "debug_cargo.jpg",
-        "debug_empty.jpg",
-        "debug_overlay.jpg",
-        "debug_overlay_light.jpg",
-        "debug_overlay_contour.jpg",
-        "debug_green.jpg",
-        "debug_brown.jpg",
-        "debug_blue.jpg",
-        "debug_dark.jpg",
-        "debug_texture.jpg"
-    ]
-
-    base_url = request.host_url.rstrip("/")
-
-    return jsonify({
-        "status": "ok",
-        "files": [
-            {
-                "file": f,
-                "url": f"{base_url}/debug/{f}",
-                "exists": os.path.exists(os.path.join(DEBUG_DIR, f))
-            }
-            for f in files
+        expected_files = [
+            "debug_original.jpg",
+            "debug_normalized.jpg",
+            "debug_container.jpg",
+            "debug_cargo.jpg",
+            "debug_empty.jpg",
+            "debug_overlay.jpg",
+            "debug_overlay_light.jpg",
+            "debug_overlay_contour.jpg",
+            "debug_green.jpg",
+            "debug_brown.jpg",
+            "debug_blue.jpg",
+            "debug_dark.jpg",
+            "debug_texture.jpg",
+            "debug_pallet_mask.jpg",
+            "debug_pallet_box.jpg",
+            "debug_box_mask.jpg",
+            "debug_blocks.jpg",
+            "debug_grid.jpg",
+            "debug_cream.jpg",
+            "debug_white.jpg",
+            "debug_green_inbound.jpg",
+            "debug_blue_inbound.jpg",
+            "debug_carton.jpg"
         ]
-    })
+
+        actual_files = []
+
+        if os.path.exists(DEBUG_DIR):
+            actual_files = sorted([
+                f for f in os.listdir(DEBUG_DIR)
+                if f.startswith("debug_") and f.lower().endswith((".jpg", ".jpeg", ".png"))
+            ])
+
+        all_files = sorted(set(expected_files + actual_files))
+
+        return jsonify({
+            "status": "ok",
+            "debug_dir": DEBUG_DIR,
+            "actual_files_count": len(actual_files),
+            "actual_files": actual_files,
+            "files": [
+                {
+                    "file": f,
+                    "url": f"{base_url}/debug/{f}",
+                    "exists": os.path.exists(os.path.join(DEBUG_DIR, f))
+                }
+                for f in all_files
+            ]
+        })
+
+    except Exception as e:
+        print("DEBUG LIST ERROR:", e)
+        print(traceback.format_exc())
+
+        return jsonify({
+            "error": "debug list server error",
+            "message": str(e)
+        }), 500
 
 
 # =========================
@@ -1640,7 +1309,10 @@ def predict():
 
         with lock:
             if row_id in processed_ids:
-                return jsonify({"status": "skipped", "id": row_id}), 200
+                return jsonify({
+                    "status": "skipped",
+                    "id": row_id
+                }), 200
 
             processed_ids.add(row_id)
 
@@ -1649,10 +1321,10 @@ def predict():
         if img is None:
             with lock:
                 processed_ids.discard(row_id)
+
             return jsonify({"error": "image fail"}), 400
 
         if project == "outbound":
-
             volume = gen_volume(
                 img,
                 debug=debug,
@@ -1664,7 +1336,6 @@ def predict():
             print("OUTBOUND:", result_text)
 
         elif project == "inbound":
-
             pallet_count = gen_pallet(
                 img,
                 debug=debug
@@ -1691,8 +1362,13 @@ def predict():
 
         if project == "inbound":
             debug_urls = {
+                "overlay": f"{base_url}/debug/debug_overlay.jpg",
                 "pallet_mask": f"{base_url}/debug/debug_pallet_mask.jpg",
                 "pallet_box": f"{base_url}/debug/debug_pallet_box.jpg",
+                "blocks": f"{base_url}/debug/debug_blocks.jpg",
+                "grid": f"{base_url}/debug/debug_grid.jpg",
+                "cargo": f"{base_url}/debug/debug_cargo.jpg",
+                "carton": f"{base_url}/debug/debug_carton.jpg",
                 "list": f"{base_url}/debug-list"
             }
         else:
@@ -1723,7 +1399,11 @@ def predict():
                 processed_ids.discard(row_id)
 
         print(traceback.format_exc())
-        return jsonify({"error": "server error"}), 500
+
+        return jsonify({
+            "error": "server error"
+        }), 500
+
 
 # =========================
 # RUN SERVER
