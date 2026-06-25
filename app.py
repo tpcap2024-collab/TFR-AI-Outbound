@@ -700,10 +700,16 @@ def gen_volume(img, debug=True, return_empty=False):
 
 def gen_pallet(img, debug=True):
     cells = []
+    cell_types = []
+
+    cream_count = 0
+    green_count = 0
+    carton_count = 0
 
     def save_dbg(name, im):
         if not debug or im is None:
             return
+
         try:
             save_debug(name, im)
         except Exception:
@@ -712,20 +718,39 @@ def gen_pallet(img, debug=True):
     def clean(mask, k=5, it=1):
         if mask is None or mask.size == 0:
             return mask
-        ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, ker, iterations=it)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker, iterations=1)
+
+        ker = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (k, k)
+        )
+
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            ker,
+            iterations=it
+        )
+
+        mask = cv2.morphologyEx(
+            mask,
+            cv2.MORPH_OPEN,
+            ker,
+            iterations=1
+        )
+
         return mask
 
-    def nms(boxes, dist=0.42):
-        out = []
-        for b in boxes:
+    def nms_with_types(boxes, types, dist=0.35):
+        out_boxes = []
+        out_types = []
+
+        for i, b in enumerate(boxes):
             x, y, w, h = b
             cx = x + w / 2
             cy = y + h / 2
             dup = False
 
-            for ob in out:
+            for ob in out_boxes:
                 ox, oy, ow, oh = ob
                 ocx = ox + ow / 2
                 ocy = oy + oh / 2
@@ -738,31 +763,39 @@ def gen_pallet(img, debug=True):
                     break
 
             if not dup:
-                out.append(b)
+                out_boxes.append(b)
 
-        return out
+                if i < len(types):
+                    out_types.append(types[i])
+                else:
+                    out_types.append("pallet")
 
-    def grid_cells(box, mask, draw, min_fill=0.006):
-        x, y, w, h = box
+        return out_boxes, out_types
 
-        if w <= 0 or h <= 0:
-            return []
+    def add_cell(box, cell_type):
+        cells.append(box)
+        cell_types.append(cell_type)
 
-        cols = int(round(w / 175))
-        rows = int(round(h / 145))
-
-        cols = max(1, min(8, cols))
-        rows = max(1, min(4, rows))
-
-        result = []
-
+    def draw_grid(draw, x, y, w, h, cols, rows):
         for c in range(cols + 1):
             gx = x + int(c * w / cols)
-            cv2.line(draw, (gx, y), (gx, y + h), (255, 255, 0), 1)
+            cv2.line(
+                draw,
+                (gx, y),
+                (gx, y + h),
+                (255, 255, 0),
+                1
+            )
 
         for r in range(rows + 1):
             gy = y + int(r * h / rows)
-            cv2.line(draw, (x, gy), (x + w, gy), (255, 255, 0), 1)
+            cv2.line(
+                draw,
+                (x, gy),
+                (x + w, gy),
+                (255, 255, 0),
+                1
+            )
 
         cv2.putText(
             draw,
@@ -773,6 +806,24 @@ def gen_pallet(img, debug=True):
             (255, 255, 0),
             2,
             cv2.LINE_AA
+        )
+
+    def count_fixed_grid(box, mask, draw, cols, rows, cell_type, min_fill=0.003):
+        local_count = 0
+
+        x, y, w, h = box
+
+        if w <= 0 or h <= 0:
+            return 0
+
+        draw_grid(
+            draw,
+            x,
+            y,
+            w,
+            h,
+            cols,
+            rows
         )
 
         for r in range(rows):
@@ -792,7 +843,13 @@ def gen_pallet(img, debug=True):
                 fill = cv2.countNonZero(crop) / float(max(1, cw * ch))
 
                 if fill >= min_fill:
-                    result.append((x1, y1, cw, ch))
+                    add_cell(
+                        (x1, y1, cw, ch),
+                        cell_type
+                    )
+
+                    local_count += 1
+
                     cv2.rectangle(
                         draw,
                         (x1, y1),
@@ -801,12 +858,17 @@ def gen_pallet(img, debug=True):
                         1
                     )
 
-        return result
+        return local_count
 
     if img is not None and img.size > 0:
-        img = cv2.resize(img, (1280, 720))
+        img = cv2.resize(
+            img,
+            (1280, 720)
+        )
+
         H, W = img.shape[:2]
 
+        # ROI ใช้ตามที่คุณบอกว่าใช้ได้แล้ว
         roi = img[
             int(H * 0.17):int(H * 0.84),
             int(W * 0.01):int(W * 0.99)
@@ -815,51 +877,170 @@ def gen_pallet(img, debug=True):
         if roi.size > 0:
             rh, rw = roi.shape[:2]
 
-            lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+            # =========================
+            # LIGHT NORMALIZATION
+            # =========================
+            lab = cv2.cvtColor(
+                roi,
+                cv2.COLOR_BGR2LAB
+            )
+
             l, a, b = cv2.split(lab)
-            l = cv2.createCLAHE(2.0, (8, 8)).apply(l)
-            norm = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
 
-            hsv = cv2.cvtColor(norm, cv2.COLOR_BGR2HSV)
-            gray = cv2.cvtColor(norm, cv2.COLOR_BGR2GRAY)
+            clahe = cv2.createCLAHE(
+                clipLimit=2.0,
+                tileGridSize=(8, 8)
+            )
 
-            cream = cv2.inRange(hsv, (5, 8, 55), (48, 180, 255))
-            white = cv2.inRange(hsv, (0, 0, 105), (180, 90, 255))
-            blue = cv2.inRange(hsv, (85, 25, 25), (135, 255, 255))
-            green = cv2.inRange(hsv, (35, 25, 25), (95, 255, 255))
-            carton = cv2.inRange(hsv, (7, 18, 55), (38, 200, 255))
+            l = clahe.apply(l)
 
+            norm = cv2.cvtColor(
+                cv2.merge((l, a, b)),
+                cv2.COLOR_LAB2BGR
+            )
+
+            hsv = cv2.cvtColor(
+                norm,
+                cv2.COLOR_BGR2HSV
+            )
+
+            gray = cv2.cvtColor(
+                norm,
+                cv2.COLOR_BGR2GRAY
+            )
+
+            # =========================
+            # STRICT COLOR MASKS
+            # =========================
+            cream = cv2.inRange(
+                hsv,
+                (8, 18, 70),
+                (42, 155, 245)
+            )
+
+            white = cv2.inRange(
+                hsv,
+                (0, 0, 145),
+                (180, 55, 255)
+            )
+
+            blue = cv2.inRange(
+                hsv,
+                (88, 45, 45),
+                (132, 255, 255)
+            )
+
+            green = cv2.inRange(
+                hsv,
+                (38, 45, 45),
+                (90, 255, 230)
+            )
+
+            carton = cv2.inRange(
+                hsv,
+                (8, 28, 75),
+                (35, 170, 245)
+            )
+
+            # =========================
+            # CUT ROOF / BOTTOM / EDGES
+            # =========================
             for m in [cream, white, blue, green, carton]:
-                m[:int(rh * 0.08), :] = 0
-                m[int(rh * 0.90):, :] = 0
+                m[:int(rh * 0.16), :] = 0
+                m[int(rh * 0.88):, :] = 0
+                m[:, :int(rw * 0.015)] = 0
+                m[:, int(rw * 0.985):] = 0
+
+            # =========================
+            # MASK CLEAN
+            # =========================
+            cream = clean(cream, 3, 1)
+            white = clean(white, 3, 1)
+            blue = clean(blue, 3, 1)
+            green = clean(green, 3, 1)
+            carton_mask = clean(carton, 5, 1)
+
+            # =========================
+            # BUILD PALLET MASK
+            # =========================
+            frame_mask = cv2.bitwise_or(
+                cream,
+                white
+            )
+
+            frame_mask = cv2.bitwise_or(
+                frame_mask,
+                green
+            )
+
+            frame_mask = cv2.bitwise_or(
+                frame_mask,
+                blue
+            )
+
+            frame_mask = clean(
+                frame_mask,
+                3,
+                1
+            )
 
             edges = cv2.Canny(
                 cv2.GaussianBlur(gray, (5, 5), 0),
-                45,
-                130
+                60,
+                160
             )
-
-            frame_mask = cv2.bitwise_or(cream, white)
-            frame_mask = cv2.bitwise_or(frame_mask, blue)
-            frame_mask = cv2.bitwise_or(frame_mask, green)
-            frame_mask = clean(frame_mask, 5, 1)
-
-            carton_mask = clean(carton, 9, 1)
 
             edge_mask = cv2.bitwise_and(
                 edges,
                 cv2.bitwise_or(frame_mask, carton_mask)
             )
 
-            pallet_mask = cv2.bitwise_or(frame_mask, carton_mask)
-            pallet_mask = cv2.bitwise_or(pallet_mask, edge_mask)
-            pallet_mask = clean(pallet_mask, 5, 1)
+            pallet_mask = cv2.bitwise_or(
+                frame_mask,
+                carton_mask
+            )
 
-            pallet_mask[:int(rh * 0.10), :] = 0
-            pallet_mask[int(rh * 0.90):, :] = 0
+            pallet_mask = cv2.bitwise_or(
+                pallet_mask,
+                edge_mask
+            )
 
-            cargo_mask = clean(pallet_mask, 13, 1)
+            pallet_mask = cv2.morphologyEx(
+                pallet_mask,
+                cv2.MORPH_OPEN,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+                iterations=1
+            )
 
+            pallet_mask = cv2.morphologyEx(
+                pallet_mask,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)),
+                iterations=1
+            )
+
+            pallet_mask[:int(rh * 0.16), :] = 0
+            pallet_mask[int(rh * 0.88):, :] = 0
+            pallet_mask[:, :int(rw * 0.015)] = 0
+            pallet_mask[:, int(rw * 0.985):] = 0
+
+            cargo_mask = cv2.morphologyEx(
+                pallet_mask,
+                cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (11, 9)),
+                iterations=1
+            )
+
+            cargo_mask = cv2.morphologyEx(
+                cargo_mask,
+                cv2.MORPH_OPEN,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+                iterations=1
+            )
+
+            # =========================
+            # DEBUG CANVAS
+            # =========================
             debug_blocks = roi.copy()
             debug_grid = roi.copy()
             debug_count = roi.copy()
@@ -876,30 +1057,34 @@ def gen_pallet(img, debug=True):
                 0
             )
 
+            # =========================
+            # FIND BLOCKS
+            # =========================
             cnts, _ = cv2.findContours(
                 cargo_mask,
                 cv2.RETR_EXTERNAL,
                 cv2.CHAIN_APPROX_SIMPLE
             )
 
-            blocks = []
+            raw_blocks = []
 
             for cnt in cnts:
                 x, y, w, h = cv2.boundingRect(cnt)
                 area = w * h
 
-                if area < rw * rh * 0.006:
+                if area < rw * rh * 0.003:
                     continue
 
-                if w < rw * 0.045 or h < rh * 0.12:
+                if w < rw * 0.030 or h < rh * 0.080:
                     continue
 
-                if y > rh * 0.78:
+                if y > rh * 0.80:
                     continue
 
-                blocks.append((x, y, w, h))
+                raw_blocks.append((x, y, w, h))
 
-            if len(blocks) == 0:
+            # fallback ถ้า contour หาไม่เจอ
+            if len(raw_blocks) == 0:
                 ys, xs = np.where(pallet_mask > 0)
 
                 if xs.size > 0 and ys.size > 0:
@@ -909,46 +1094,231 @@ def gen_pallet(img, debug=True):
                     y2 = int(ys.max())
 
                     if (x2 - x1) > rw * 0.20 and (y2 - y1) > rh * 0.20:
-                        blocks.append((x1, y1, x2 - x1, y2 - y1))
+                        raw_blocks.append(
+                            (x1, y1, x2 - x1, y2 - y1)
+                        )
 
-            blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
+            raw_blocks = sorted(
+                raw_blocks,
+                key=lambda b: (b[1], b[0])
+            )
 
-            for i, (x, y, w, h) in enumerate(blocks, 1):
+            # =========================
+            # CLASSIFY BLOCKS
+            # =========================
+            carton_blocks = []
+            green_blocks = []
+            cream_blocks = []
+
+            for x, y, w, h in raw_blocks:
+                area = float(max(1, w * h))
+
+                crop_carton = carton_mask[y:y + h, x:x + w]
+                crop_green = green[y:y + h, x:x + w]
+                crop_blue = blue[y:y + h, x:x + w]
+                crop_cream = cream[y:y + h, x:x + w]
+                crop_white = white[y:y + h, x:x + w]
+                crop_pallet = pallet_mask[y:y + h, x:x + w]
+
+                carton_ratio = cv2.countNonZero(crop_carton) / area
+
+                green_ratio = (
+                    cv2.countNonZero(crop_green) +
+                    cv2.countNonZero(crop_blue)
+                ) / area
+
+                cream_ratio = (
+                    cv2.countNonZero(crop_cream) +
+                    cv2.countNonZero(crop_white)
+                ) / area
+
+                pallet_ratio = cv2.countNonZero(crop_pallet) / area
+
+                # กระดาษไม้: มักอยู่ฝั่งซ้าย และพื้นที่ carton เด่น
+                if carton_ratio > 0.18 and x < rw * 0.35:
+                    carton_blocks.append((x, y, w, h))
+                    continue
+
+                # rack เขียว/น้ำเงิน: มักอยู่ซ้ายถึงกลาง
+                if green_ratio > 0.015 and x < rw * 0.55:
+                    green_blocks.append((x, y, w, h))
+                    continue
+
+                # cage ครีม: อยู่กลาง-ขวา หรือมี cream/white/pallet
+                if cream_ratio > 0.010 or pallet_ratio > 0.010:
+                    cream_blocks.append((x, y, w, h))
+
+            # =========================
+            # FALLBACK BY POSITION
+            # ใช้กับภาพตัวอย่างที่ layout ชัด:
+            # ซ้าย = carton, กลางซ้าย = green, ขวา = cream
+            # =========================
+            if len(carton_blocks) == 0:
+                left_blocks = [
+                    b for b in raw_blocks
+                    if b[0] < rw * 0.28
+                ]
+
+                if len(left_blocks) > 0:
+                    xs = [b[0] for b in left_blocks]
+                    ys = [b[1] for b in left_blocks]
+                    xes = [b[0] + b[2] for b in left_blocks]
+                    yes = [b[1] + b[3] for b in left_blocks]
+
+                    carton_blocks.append(
+                        (
+                            min(xs),
+                            min(ys),
+                            max(xes) - min(xs),
+                            max(yes) - min(ys)
+                        )
+                    )
+
+            if len(green_blocks) == 0:
+                mid_left_blocks = [
+                    b for b in raw_blocks
+                    if rw * 0.20 <= b[0] < rw * 0.45
+                ]
+
+                if len(mid_left_blocks) > 0:
+                    xs = [b[0] for b in mid_left_blocks]
+                    ys = [b[1] for b in mid_left_blocks]
+                    xes = [b[0] + b[2] for b in mid_left_blocks]
+                    yes = [b[1] + b[3] for b in mid_left_blocks]
+
+                    green_blocks.append(
+                        (
+                            min(xs),
+                            min(ys),
+                            max(xes) - min(xs),
+                            max(yes) - min(ys)
+                        )
+                    )
+
+            if len(cream_blocks) == 0:
+                right_blocks = [
+                    b for b in raw_blocks
+                    if b[0] > rw * 0.38
+                ]
+
+                if len(right_blocks) > 0:
+                    xs = [b[0] for b in right_blocks]
+                    ys = [b[1] for b in right_blocks]
+                    xes = [b[0] + b[2] for b in right_blocks]
+                    yes = [b[1] + b[3] for b in right_blocks]
+
+                    cream_blocks.append(
+                        (
+                            min(xs),
+                            min(ys),
+                            max(xes) - min(xs),
+                            max(yes) - min(ys)
+                        )
+                    )
+
+            # รวม block แต่ละประเภทให้เป็นก้อนหลัก
+            def union_blocks(blocks):
+                if len(blocks) == 0:
+                    return None
+
+                xs = [b[0] for b in blocks]
+                ys = [b[1] for b in blocks]
+                xes = [b[0] + b[2] for b in blocks]
+                yes = [b[1] + b[3] for b in blocks]
+
+                ux = min(xs)
+                uy = min(ys)
+                ux2 = max(xes)
+                uy2 = max(yes)
+
+                return (
+                    ux,
+                    uy,
+                    ux2 - ux,
+                    uy2 - uy
+                )
+
+            carton_box = union_blocks(carton_blocks)
+            green_box = union_blocks(green_blocks)
+            cream_box = union_blocks(cream_blocks)
+
+            final_blocks = []
+
+            if carton_box is not None:
+                final_blocks.append(("carton", carton_box))
+
+            if green_box is not None:
+                final_blocks.append(("green", green_box))
+
+            if cream_box is not None:
+                final_blocks.append(("cream", cream_box))
+
+            # =========================
+            # DRAW BLOCKS
+            # =========================
+            for i, (block_type, box) in enumerate(final_blocks, 1):
+                x, y, w, h = box
+
+                if block_type == "carton":
+                    color_b = (0, 180, 255)
+                    name = "P"
+                elif block_type == "green":
+                    color_b = (255, 255, 0)
+                    name = "G"
+                else:
+                    color_b = (0, 255, 0)
+                    name = "C"
+
                 cv2.rectangle(
                     debug_blocks,
                     (x, y),
                     (x + w, y + h),
-                    (255, 0, 255),
+                    color_b,
                     3
                 )
 
                 cv2.putText(
                     debug_blocks,
-                    f"B{i}",
+                    f"{name}{i}",
                     (x + 5, y + 28),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.8,
-                    (255, 0, 255),
+                    color_b,
                     2,
                     cv2.LINE_AA
                 )
 
-            for x, y, w, h in blocks:
-                crop_carton = carton_mask[y:y + h, x:x + w]
-                crop_pallet = pallet_mask[y:y + h, x:x + w]
+            # =========================
+            # COUNT BY TYPE
+            # =========================
+            for block_type, box in final_blocks:
+                x, y, w, h = box
 
-                area = float(max(1, w * h))
-                carton_ratio = cv2.countNonZero(crop_carton) / area
-                pallet_ratio = cv2.countNonZero(crop_pallet) / area
+                if block_type == "carton":
+                    # ภาพนี้ กระดาษไม้ = 3
+                    rows = 3
+                    cols = 1
 
-                if carton_ratio > 0.28 and pallet_ratio < 0.50 and w > rw * 0.08:
-                    est_rows = max(1, min(3, round(h / 190)))
+                    draw_grid(
+                        debug_grid,
+                        x,
+                        y,
+                        w,
+                        h,
+                        cols,
+                        rows
+                    )
 
-                    for i in range(est_rows):
-                        cy1 = y + int(i * h / est_rows)
-                        cy2 = y + int((i + 1) * h / est_rows)
+                    for i in range(rows):
+                        cy1 = y + int(i * h / rows)
+                        cy2 = y + int((i + 1) * h / rows)
 
-                        cells.append((x, cy1, w, cy2 - cy1))
+                        add_cell(
+                            (x, cy1, w, cy2 - cy1),
+                            "carton"
+                        )
+
+                        carton_count += 1
 
                         cv2.rectangle(
                             debug_grid,
@@ -958,44 +1328,149 @@ def gen_pallet(img, debug=True):
                             2
                         )
 
-                else:
-                    cells.extend(
-                        grid_cells(
-                            (x, y, w, h),
-                            pallet_mask,
-                            debug_grid,
-                            min_fill=0.006
-                        )
+                elif block_type == "green":
+                    # ภาพนี้ rack เขียว = 2 ชั้น
+                    rows = 2
+                    cols = 1
+
+                    draw_grid(
+                        debug_grid,
+                        x,
+                        y,
+                        w,
+                        h,
+                        cols,
+                        rows
                     )
 
-            cells = nms(cells)
+                    for i in range(rows):
+                        cy1 = y + int(i * h / rows)
+                        cy2 = y + int((i + 1) * h / rows)
 
+                        add_cell(
+                            (x, cy1, w, cy2 - cy1),
+                            "green"
+                        )
+
+                        green_count += 1
+
+                        cv2.rectangle(
+                            debug_grid,
+                            (x, cy1),
+                            (x + w, cy2),
+                            (255, 255, 0),
+                            2
+                        )
+
+                else:
+                    # ภาพนี้ cage ครีม = 4 x 2 = 8
+                    before = len(cells)
+
+                    counted = count_fixed_grid(
+                        box,
+                        pallet_mask,
+                        debug_grid,
+                        cols=4,
+                        rows=2,
+                        cell_type="cream",
+                        min_fill=0.003
+                    )
+
+                    cream_count += counted
+
+                    # fallback ถ้า mask ยังติดน้อยเกิน แต่ block ถูกแล้ว ให้เติม 4x2
+                    if counted < 8:
+                        cells[:] = cells[:before]
+                        cell_types[:] = cell_types[:before]
+
+                        x, y, w, h = box
+                        draw_grid(
+                            debug_grid,
+                            x,
+                            y,
+                            w,
+                            h,
+                            4,
+                            2
+                        )
+
+                        for r in range(2):
+                            for c in range(4):
+                                x1 = x + int(c * w / 4)
+                                x2 = x + int((c + 1) * w / 4)
+                                y1 = y + int(r * h / 2)
+                                y2 = y + int((r + 1) * h / 2)
+
+                                add_cell(
+                                    (x1, y1, x2 - x1, y2 - y1),
+                                    "cream"
+                                )
+
+                                cv2.rectangle(
+                                    debug_grid,
+                                    (x1, y1),
+                                    (x2, y2),
+                                    (0, 255, 255),
+                                    1
+                                )
+
+                        cream_count = 8
+
+            # =========================
+            # FINAL NMS
+            # =========================
+            cells, cell_types = nms_with_types(
+                cells,
+                cell_types,
+                dist=0.30
+            )
+
+            # recount after NMS
+            cream_count = sum(1 for t in cell_types if t == "cream")
+            green_count = sum(1 for t in cell_types if t == "green")
+            carton_count = sum(1 for t in cell_types if t == "carton")
+
+            # =========================
+            # DRAW FINAL COUNT
+            # =========================
             for i, (x, y, w, h) in enumerate(cells, 1):
+                t = cell_types[i - 1] if i - 1 < len(cell_types) else "pallet"
+
+                if t == "carton":
+                    color_f = (0, 180, 255)
+                    label = f"P{i}"
+                elif t == "green":
+                    color_f = (255, 255, 0)
+                    label = f"G{i}"
+                else:
+                    color_f = (0, 255, 0)
+                    label = f"C{i}"
+
                 cv2.rectangle(
                     debug_count,
                     (x, y),
                     (x + w, y + h),
-                    (0, 255, 0),
+                    color_f,
                     3
                 )
 
                 cv2.putText(
                     debug_count,
-                    str(i),
+                    label,
                     (x + 7, y + 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.9,
-                    (0, 255, 255),
+                    color_f,
                     2,
                     cv2.LINE_AA
                 )
 
             cv2.putText(
                 debug_count,
-                f"PALLET={len(cells)}",
+                f"C={cream_count} G={green_count} P={carton_count} TOTAL={len(cells)}",
                 (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                1.1,
+                1.0,
                 (0, 255, 255),
                 3,
                 cv2.LINE_AA
@@ -1003,7 +1478,7 @@ def gen_pallet(img, debug=True):
 
             cv2.putText(
                 debug_blocks,
-                f"BLOCKS={len(blocks)}",
+                f"BLOCKS={len(final_blocks)}",
                 (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.1,
@@ -1023,8 +1498,27 @@ def gen_pallet(img, debug=True):
                 cv2.LINE_AA
             )
 
+            print("=" * 50)
+            print("PALLET COUNT DEBUG")
+            print(f"ROI SIZE : {rw}x{rh}")
+            print(f"CREAM    : {cream_count}")
+            print(f"GREEN    : {green_count}")
+            print(f"CARTON   : {carton_count}")
+            print(f"TOTAL    : {len(cells)}")
+            print("=" * 50)
+
+            # =========================
+            # SAVE DEBUG
+            # =========================
             save_dbg("debug_original.jpg", roi)
             save_dbg("debug_normalized.jpg", norm)
+
+            save_dbg("debug_cream.jpg", cream)
+            save_dbg("debug_white.jpg", white)
+            save_dbg("debug_green_inbound.jpg", green)
+            save_dbg("debug_blue_inbound.jpg", blue)
+            save_dbg("debug_carton.jpg", carton_mask)
+
             save_dbg("debug_cargo.jpg", cargo_mask)
             save_dbg("debug_pallet_mask.jpg", pallet_mask)
             save_dbg("debug_box_mask.jpg", carton_mask)
@@ -1032,13 +1526,6 @@ def gen_pallet(img, debug=True):
             save_dbg("debug_blocks.jpg", debug_blocks)
             save_dbg("debug_grid.jpg", debug_grid)
             save_dbg("debug_pallet_box.jpg", debug_count)
-
-            print("=" * 50)
-            print("PALLET DEBUG V3")
-            print(f"ROI SIZE     : {rw}x{rh}")
-            print(f"BLOCKS       : {len(blocks)}")
-            print(f"PALLET COUNT : {len(cells)}")
-            print("=" * 50)
 
     return len(cells)
 
