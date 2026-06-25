@@ -121,17 +121,16 @@ def gen_pallet(img, debug=True):
     )
 
     # =========================
-    # EDGE (ช่วยแยก rack)
+    # EDGE
     # =========================
     edges = cv2.Canny(gray, 50, 150)
 
-    # combine structure
     combine = cv2.bitwise_or(green_mask, edges)
 
     debug_img = roi.copy()
 
     # =========================
-    # ✅ STEP 1: SPLIT X (ซ้าย→ขวา)
+    # SPLIT X
     # =========================
     col_sum = np.sum(combine > 0, axis=0)
     col_th  = np.max(col_sum) * 0.35
@@ -149,9 +148,8 @@ def gen_pallet(img, debug=True):
             end = i
             width = end - start
 
-            # ✅ force split block ใหญ่
             if width > rw * 0.22:
-                mid = (start + end) // 2
+                mid = (start + end)//2
                 x_blocks.append((start, mid))
                 x_blocks.append((mid, end))
             else:
@@ -163,7 +161,7 @@ def gen_pallet(img, debug=True):
         x_blocks.append((start, len(col_sum)-1))
 
     # =========================
-    # ✅ REMOVE GAP (ช่องว่างจริง)
+    # REMOVE GAP + FILTER WIDTH
     # =========================
     filtered = []
 
@@ -171,26 +169,31 @@ def gen_pallet(img, debug=True):
         block = green_mask[:, x1:x2]
 
         density = np.sum(block > 0) / (block.size + 1e-6)
+        width = x2 - x1
 
+        # ❌ ตัดช่องว่าง
         if density < 0.05:
+            continue
+
+        # ✅ ✅ ✅ ตัด block แคบ (สำคัญสุด)
+        if width < rw * 0.08:
             continue
 
         filtered.append((x1,x2))
 
     x_blocks = filtered
 
-    drywall_color = (0,255,0)
     pallet_count = 0
 
     # =========================
-    # ✅ STEP 2: SPLIT Y (บน-ล่าง)
+    # SPLIT Y
     # =========================
     for (x1,x2) in x_blocks:
 
         sub = green_mask[:, x1:x2]
 
         row_sum = np.sum(sub > 0, axis=1)
-        row_th  = np.max(row_sum) * 0.30   # ลด over split
+        row_th  = np.max(row_sum) * 0.30
 
         in_row = False
 
@@ -201,10 +204,11 @@ def gen_pallet(img, debug=True):
                 in_row = True
 
             elif row_sum[j] <= row_th and in_row:
-                ey = j
 
+                ey = j
                 height = ey - sy
 
+                # ✅ กัน block เตี้ยเกิน
                 if height > rh * 0.12:
                     pallet_count += 1
 
@@ -212,34 +216,31 @@ def gen_pallet(img, debug=True):
                         debug_img,
                         (x1, sy),
                         (x2, ey),
-                        drywall_color,
+                        (0,255,0),
                         3
                     )
 
                     cv2.putText(
                         debug_img,
                         f"P{pallet_count}",
-                        (x1 + 5, sy + 30),
+                        (x1+5, sy+30),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.8,
-                        drywall_color,
+                        (0,255,0),
                         2
                     )
 
                 in_row = False
 
-        # handle end row
         if in_row:
-            height = len(row_sum) - sy
-
-            if height > rh * 0.12:
+            if (len(row_sum)-sy) > rh*0.12:
                 pallet_count += 1
 
                 cv2.rectangle(
                     debug_img,
                     (x1, sy),
                     (x2, len(row_sum)),
-                    drywall_color,
+                    (0,255,0),
                     3
                 )
 
@@ -256,13 +257,8 @@ def gen_pallet(img, debug=True):
         3
     )
 
-    print("="*50)
-    print("FINAL PALLET COUNT =", pallet_count)
-    print("="*50)
+    print("FINAL PALLET =", pallet_count)
 
-    # =========================
-    # DEBUG OUTPUT
-    # =========================
     if debug:
         save_debug("debug_green_mask.jpg", green_mask)
         save_debug("debug_edges.jpg", edges)
