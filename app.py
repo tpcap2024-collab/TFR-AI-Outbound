@@ -233,9 +233,20 @@ def predict():
 
     data = request.get_json()
 
+    print("="*40)
+    print("REQUEST:", data)
+    print("="*40)
+
     image_url = data.get("link")
     row_id = data.get("id")
-    project = data.get("project","outbound")
+
+    project = str(data.get("project","")).strip().lower()
+
+    if project not in ["inbound", "outbound"]:
+        print("⚠️ INVALID PROJECT → FORCE INBOUND")
+        project = "inbound"
+
+    print("PROJECT =", project)
 
     if not image_url or not row_id:
         return {"error":"missing"},400
@@ -245,14 +256,18 @@ def predict():
         return {"error":"image fail"},400
 
     if project == "inbound":
+        print("RUN PALLET MODEL")
         result = str(gen_pallet(img))
+
     else:
+        print("RUN VOLUME MODEL")
         result = f"{gen_volume(img)}%"
 
     update_appsheet(row_id, result)
 
     return {
         "status":"success",
+        "project": project,
         "result": result
     }
 
