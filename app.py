@@ -95,7 +95,7 @@ def gen_volume(img, debug=True, return_empty=False):
 
 def gen_pallet(img, debug=True):
 
-    img = cv2.resize(img, (1280,720))
+    img = cv2.resize(img,(1280,720))
     H,W = img.shape[:2]
 
     roi = img[
@@ -105,112 +105,137 @@ def gen_pallet(img, debug=True):
 
     rh,rw = roi.shape[:2]
 
-    # =========================
-    # COLOR SPACE
-    # =========================
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-    # ✅ GREEN RACK (สำคัญมาก)
+    # =========================
+    # GREEN MASK (rack)
+    # =========================
     green_mask = cv2.inRange(
         hsv,
-        (35, 40, 40),
-        (85, 255, 255)
+        (30, 30, 30),
+        (90, 255, 255)
     )
 
-    # =========================
-    # CLEAN MASK
-    # =========================
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(7,7))
-
-    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN,  kernel, iterations=1)
-
-    # =========================
-    # MERGE STRUCTURE
-    # =========================
-    merged = cv2.morphologyEx(
-        green_mask,
-        cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT,(25,25)),
-        iterations=2
-    )
-
-    # =========================
-    # FIND BLOCKS (rack)
-    # =========================
-    contours,_ = cv2.findContours(
-        merged,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    blocks = []
-
-    for c in contours:
-        x,y,w,h = cv2.boundingRect(c)
-
-        area = w*h
-
-        # กรองจุดเล็ก
-        if area < rw*rh*0.02:
-            continue
-
-        # กรองแนวเตี้ย (พื้น)
-        if h < rh*0.15:
-            continue
-
-        blocks.append((x,y,w,h))
-
-    # sort ซ้าย → ขวา
-    blocks = sorted(blocks, key=lambda b: b[0])
+    # clean noise
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(5,5))
+    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN, kernel, 1)
 
     debug_img = roi.copy()
 
     # =========================
-    # DRAW
+    # STEP 1: SPLIT LEFT-RIGHT
     # =========================
-    count = 0
+    col_sum = np.sum(green_mask > 0, axis=0)
+    col_threshold = np.max(col_sum) * 0.25
 
-    for i,(x,y,w,h) in enumerate(blocks,1):
+    x_blocks = []
+    in_block = False
 
-        count += 1
+    for i in range(len(col_sum)):
+        if col_sum[i] > col_threshold and not in_block:
+            start = i
+            in_block = True
 
-        cv2.rectangle(debug_img, (x,y),(x+w,y+h),(0,255,0),3)
+        elif col_sum[i] <= col_threshold and in_block:
+            end = i
+            x_blocks.append((start,end))
+            in_block = False
 
-        cv2.putText(
-            debug_img,
-            f"P{i}",
-            (x+5,y+30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0,255,0),
-            2
-        )
+    if in_block:
+        x_blocks.append((start,len(col_sum)-1))
+
+    # =========================
+    # STEP 2: PROCESS EACH COLUMN BLOCK
+    # =========================
+    pallet_count = 0
+
+    for (x1,x2) in x_blocks:
+
+        width = x2-x1
+        if width < rw*0.05:
+            continue
+
+        sub_mask = green_mask[:, x1:x2]
+
+        # -------------------------
+        # STEP 2.1: split top-bottom (layer)
+        # -------------------------
+        row_sum = np.sum(sub_mask > 0, axis=1)
+        row_threshold = np.max(row_sum) * 0.2
+
+        y_blocks = []
+        in_row = False
+
+        for j in range(len(row_sum)):
+            if row_sum[j] > row_threshold and not in_row:
+                sy = j
+                in_row = True
+
+            elif row_sum[j] <= row_threshold and in_row:
+                ey = j
+                y_blocks.append((sy,ey))
+                in_row = False
+
+        if in_row:
+            y_blocks.append((sy,len(row_sum)-1))
+
+        # -------------------------
+        # STEP 2.2: each sub-block = pallet
+        # -------------------------
+        for (y1,y2) in y_blocks:
+
+            height = y2 - y1
+
+            if height < rh*0.12:
+                continue
+
+            pallet_count += 1
+
+            # draw
+            cv2.rectangle(
+                debug_img,
+                (x1,y1),
+                (x2,y2),
+                (0,255,0),
+                3
+            )
+
+            cv2.putText(
+                debug_img,
+                f"P{pallet_count}",
+                (x1+5, y1+25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0,255,0),
+                2
+            )
 
     # =========================
     # RESULT
     # =========================
     cv2.putText(
         debug_img,
-        f"PALLET={count}",
+        f"PALLET={pallet_count}",
         (20,40),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1.2,
+        1,
         (0,255,255),
         3
     )
 
     print("="*50)
-    print("GREEN RACK DETECT")
-    print("PALLET =", count)
+    print("FULL PRODUCTION PALLET")
+    print("TOTAL =", pallet_count)
     print("="*50)
 
+    # =========================
+    # DEBUG
+    # =========================
     if debug:
         save_debug("debug_green_mask.jpg", green_mask)
-        save_debug("debug_merged.jpg", merged)
         save_debug("debug_pallet_box.jpg", debug_img)
 
-    return count
+    return pallet_count
 
 
 
