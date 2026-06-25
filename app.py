@@ -105,110 +105,143 @@ def gen_pallet(img, debug=True):
 
     rh,rw = roi.shape[:2]
 
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
     # =========================
-    # GREEN MASK (rack)
+    # GREEN MASK
     # =========================
-    green_mask = cv2.inRange(
-        hsv,
-        (30, 30, 30),
-        (90, 255, 255)
+    green_mask = cv2.inRange(hsv, (30,30,30), (90,255,255))
+
+    green_mask = cv2.morphologyEx(
+        green_mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT,(5,5)),
+        1
     )
 
-    # clean noise
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(5,5))
-    green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN, kernel, 1)
+    # =========================
+    # EDGE (ช่วยแยก rack)
+    # =========================
+    edges = cv2.Canny(gray, 50, 150)
+
+    # combine structure
+    combine = cv2.bitwise_or(green_mask, edges)
 
     debug_img = roi.copy()
 
     # =========================
-    # STEP 1: SPLIT LEFT-RIGHT
+    # ✅ STEP 1: SPLIT X (ซ้าย→ขวา)
     # =========================
-    col_sum = np.sum(green_mask > 0, axis=0)
-    col_threshold = np.max(col_sum) * 0.25
+    col_sum = np.sum(combine > 0, axis=0)
+    col_th  = np.max(col_sum) * 0.35
 
     x_blocks = []
     in_block = False
 
     for i in range(len(col_sum)):
-        if col_sum[i] > col_threshold and not in_block:
+
+        if col_sum[i] > col_th and not in_block:
             start = i
             in_block = True
 
-        elif col_sum[i] <= col_threshold and in_block:
+        elif col_sum[i] <= col_th and in_block:
             end = i
-            x_blocks.append((start,end))
+            width = end - start
+
+            # ✅ force split block ใหญ่
+            if width > rw * 0.22:
+                mid = (start + end) // 2
+                x_blocks.append((start, mid))
+                x_blocks.append((mid, end))
+            else:
+                x_blocks.append((start, end))
+
             in_block = False
 
     if in_block:
-        x_blocks.append((start,len(col_sum)-1))
+        x_blocks.append((start, len(col_sum)-1))
 
     # =========================
-    # STEP 2: PROCESS EACH COLUMN BLOCK
+    # ✅ REMOVE GAP (ช่องว่างจริง)
     # =========================
-    pallet_count = 0
+    filtered = []
 
     for (x1,x2) in x_blocks:
+        block = green_mask[:, x1:x2]
 
-        width = x2-x1
-        if width < rw*0.05:
+        density = np.sum(block > 0) / (block.size + 1e-6)
+
+        if density < 0.05:
             continue
 
-        sub_mask = green_mask[:, x1:x2]
+        filtered.append((x1,x2))
 
-        # -------------------------
-        # STEP 2.1: split top-bottom (layer)
-        # -------------------------
-        row_sum = np.sum(sub_mask > 0, axis=1)
-        row_threshold = np.max(row_sum) * 0.2
+    x_blocks = filtered
 
-        y_blocks = []
+    drywall_color = (0,255,0)
+    pallet_count = 0
+
+    # =========================
+    # ✅ STEP 2: SPLIT Y (บน-ล่าง)
+    # =========================
+    for (x1,x2) in x_blocks:
+
+        sub = green_mask[:, x1:x2]
+
+        row_sum = np.sum(sub > 0, axis=1)
+        row_th  = np.max(row_sum) * 0.30   # ลด over split
+
         in_row = False
 
         for j in range(len(row_sum)):
-            if row_sum[j] > row_threshold and not in_row:
+
+            if row_sum[j] > row_th and not in_row:
                 sy = j
                 in_row = True
 
-            elif row_sum[j] <= row_threshold and in_row:
+            elif row_sum[j] <= row_th and in_row:
                 ey = j
-                y_blocks.append((sy,ey))
+
+                height = ey - sy
+
+                if height > rh * 0.12:
+                    pallet_count += 1
+
+                    cv2.rectangle(
+                        debug_img,
+                        (x1, sy),
+                        (x2, ey),
+                        drywall_color,
+                        3
+                    )
+
+                    cv2.putText(
+                        debug_img,
+                        f"P{pallet_count}",
+                        (x1 + 5, sy + 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        drywall_color,
+                        2
+                    )
+
                 in_row = False
 
+        # handle end row
         if in_row:
-            y_blocks.append((sy,len(row_sum)-1))
+            height = len(row_sum) - sy
 
-        # -------------------------
-        # STEP 2.2: each sub-block = pallet
-        # -------------------------
-        for (y1,y2) in y_blocks:
+            if height > rh * 0.12:
+                pallet_count += 1
 
-            height = y2 - y1
-
-            if height < rh*0.12:
-                continue
-
-            pallet_count += 1
-
-            # draw
-            cv2.rectangle(
-                debug_img,
-                (x1,y1),
-                (x2,y2),
-                (0,255,0),
-                3
-            )
-
-            cv2.putText(
-                debug_img,
-                f"P{pallet_count}",
-                (x1+5, y1+25),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0,255,0),
-                2
-            )
+                cv2.rectangle(
+                    debug_img,
+                    (x1, sy),
+                    (x2, len(row_sum)),
+                    drywall_color,
+                    3
+                )
 
     # =========================
     # RESULT
@@ -224,15 +257,15 @@ def gen_pallet(img, debug=True):
     )
 
     print("="*50)
-    print("FULL PRODUCTION PALLET")
-    print("TOTAL =", pallet_count)
+    print("FINAL PALLET COUNT =", pallet_count)
     print("="*50)
 
     # =========================
-    # DEBUG
+    # DEBUG OUTPUT
     # =========================
     if debug:
         save_debug("debug_green_mask.jpg", green_mask)
+        save_debug("debug_edges.jpg", edges)
         save_debug("debug_pallet_box.jpg", debug_img)
 
     return pallet_count
