@@ -101,13 +101,18 @@ def gen_pallet(img, debug=True):
     cells = []
     types = []
 
-    def add(x,y,w,h,t):
-        cells.append((x,y,w,h))
+    def add_cell(box, t):
+        cells.append(box)
         types.append(t)
 
-    def draw(draw, box, cols, rows, t, prefix):
+    def color(t):
+        if t == "cream": return (0,255,0)
+        if t == "blue":  return (255,180,0)
+        if t == "wood":  return (0,180,255)
+        return (0,255,255)
+
+    def split_grid(draw, box, cols, rows, t):
         x,y,w,h = box
-        no = 1
 
         for r in range(rows):
             for c in range(cols):
@@ -116,51 +121,175 @@ def gen_pallet(img, debug=True):
                 y1 = y + int(r*h/rows)
                 y2 = y + int((r+1)*h/rows)
 
-                add(x1,y1,x2-x1,y2-y1,t)
+                if (x2-x1) < 25 or (y2-y1) < 25:
+                    continue
 
-                cv2.rectangle(draw,(x1,y1),(x2,y2),(0,255,255),2)
-                cv2.putText(draw,f"{prefix}{no}",
-                            (x1+5,y1+25),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,(0,255,255),2)
-                no+=1
+                add_cell((x1,y1,x2-x1,y2-y1), t)
 
+                cv2.rectangle(draw,(x1,y1),(x2,y2),color(t),2)
+
+    # =========================
+    # PREPROCESS
+    # =========================
     img = cv2.resize(img,(1280,720))
-    H,W = img.shape[:2]
+    H, W = img.shape[:2]
 
-    roi = img[int(H*0.17):int(H*0.84), int(W*0.01):int(W*0.99)]
-    rh,rw = roi.shape[:2]
+    roi = img[
+        int(H*0.17):int(H*0.84),
+        int(W*0.02):int(W*0.98)
+    ]
 
-    debug_img = roi.copy()
+    rh, rw = roi.shape[:2]
 
-    y1 = int(rh*0.15)
-    y2 = int(rh*0.88)
-    h_box = y2-y1
+    # =========================
+    # LIGHT NORMALIZATION
+    # =========================
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
 
-    # แบ่ง 3 block
-    wood = (0, y1, int(rw*0.24), h_box)
-    blue = (int(rw*0.24), y1, int(rw*0.18), h_box)
-    cream= (int(rw*0.42), y1, int(rw*0.58), h_box)
+    clahe = cv2.createCLAHE(2.0,(8,8))
+    l = clahe.apply(l)
 
-    # =====================
+    norm = cv2.cvtColor(cv2.merge((l,a,b)), cv2.COLOR_LAB2BGR)
+
+    hsv  = cv2.cvtColor(norm, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(norm, cv2.COLOR_BGR2GRAY)
+
+    # =========================
+    # COLOR MASKS
+    # =========================
+    cream = cv2.inRange(hsv, (5,10,80), (40,160,255))
+    white = cv2.inRange(hsv, (0,0,160), (180,60,255))
+    cream_mask = cv2.bitwise_or(cream, white)
+
+    blue_mask = cv2.inRange(hsv, (85,40,40), (130,255,255))
+    wood_mask = cv2.inRange(hsv, (5,40,40), (30,200,200))
+
+    # =========================
+    # CLEAN
+    # =========================
+    def clean(mask, k=5):
+        return cv2.morphologyEx(
+            mask,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT,(k,k)),
+            iterations=1
+        )
+
+    cream_mask = clean(cream_mask)
+    blue_mask  = clean(blue_mask)
+    wood_mask  = clean(wood_mask)
+
+    # =========================
+    # MERGE ALL
+    # =========================
+    combined = cv2.bitwise_or(cream_mask, blue_mask)
+    combined = cv2.bitwise_or(combined, wood_mask)
+
+    combined = cv2.morphologyEx(
+        combined,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT,(15,15)),
+        iterations=2
+    )
+
+    # =========================
+    # FIND BLOCKS
+    # =========================
+    contours,_ = cv2.findContours(
+        combined,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    blocks = []
+
+    for c in contours:
+        x,y,w,h = cv2.boundingRect(c)
+
+        if w*h < rw*rh*0.015:
+            continue
+
+        blocks.append((x,y,w,h))
+
+    # sort ซ้าย → ขวา
+    blocks = sorted(blocks, key=lambda b: b[0])
+
+    debug_img = norm.copy()
+
+    # =========================
+    # CLASSIFY + GRID
+    # =========================
+    for box in blocks:
+
+        x,y,w,h = box
+        area = float(max(1,w*h))
+
+        cream_ratio = cv2.countNonZero(
+            cream_mask[y:y+h, x:x+w]) / area
+
+        blue_ratio = cv2.countNonZero(
+            blue_mask[y:y+h, x:x+w]) / area
+
+        wood_ratio = cv2.countNonZero(
+            wood_mask[y:y+h, x:x+w]) / area
+
+        # =========================
+        # TYPE LOGIC
+        # =========================
+        if cream_ratio > 0.05:
+            t = "cream"
+
+        elif blue_ratio > 0.04:
+            t = "blue"
+
+        else:
+            t = "wood"
+
+        # =========================
+        # GRID DECISION
+        # =========================
+        aspect = w / float(max(1,h))
+
+        if t == "cream":
+            cols = max(2, int(aspect * 2))
+            rows = 2
+
+        elif t == "blue":
+            cols = 1
+            rows = max(2, int(h / 120))
+
+        else:  # wood
+            cols = 1
+            rows = max(2, int(h / 100))
+
+        split_grid(debug_img, box, cols, rows, t)
+
+        # =========================
+        # DRAW BLOCK
+        # =========================
+        cv2.rectangle(debug_img,(x,y),(x+w,y+h),color(t),3)
+
+        cv2.putText(
+            debug_img,
+            f"{t}",
+            (x+5,y+25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,color(t),2
+        )
+
+    # =========================
     # COUNT
-    # =====================
-    draw(debug_img, wood, 1, 3, "wood", "W")
-    draw(debug_img, blue, 1, 2, "blue", "B")
-    draw(debug_img, cream, 4, 2, "cream", "C")
-
-    # =====================
-    # COUNT RESULT
-    # =====================
-    wood_c = sum(1 for t in types if t=="wood")
-    blue_c = sum(1 for t in types if t=="blue")
-    cream_c= sum(1 for t in types if t=="cream")
+    # =========================
+    cream_c = sum(1 for t in types if t=="cream")
+    blue_c  = sum(1 for t in types if t=="blue")
+    wood_c  = sum(1 for t in types if t=="wood")
 
     total = len(cells)
 
     cv2.putText(
         debug_img,
-        f"CREAM={cream_c} BLUE={blue_c} WOOD={wood_c} TOTAL={total}",
+        f"C={cream_c} B={blue_c} W={wood_c} TOTAL={total}",
         (20,40),
         cv2.FONT_HERSHEY_SIMPLEX,
         1,
@@ -168,16 +297,28 @@ def gen_pallet(img, debug=True):
         3
     )
 
-    if debug:
-        save_debug("debug_blocks.jpg", debug_img)
-        save_debug("debug_pallet_box.jpg", debug_img)
-        save_debug("debug_grid.jpg", debug_img)
-
-    print("===== INBOUND RESULT =====")
+    # =========================
+    # LOG
+    # =========================
+    print("="*50)
+    print("PRODUCTION PALLET RESULT")
     print("CREAM:", cream_c)
     print("BLUE :", blue_c)
     print("WOOD :", wood_c)
     print("TOTAL:", total)
+    print("="*50)
+
+    # =========================
+    # DEBUG
+    # =========================
+    if debug:
+        save_debug("debug_overlay.jpg", debug_img)
+        save_debug("debug_blocks.jpg", debug_img)
+        save_debug("debug_grid.jpg", debug_img)
+        save_debug("debug_cargo.jpg", combined)
+        save_debug("debug_cream.jpg", cream_mask)
+        save_debug("debug_blue.jpg", blue_mask)
+        save_debug("debug_wood.jpg", wood_mask)
 
     return total
 
