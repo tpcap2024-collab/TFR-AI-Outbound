@@ -135,21 +135,21 @@ def gen_pallet(img, debug=True):
             return (0, 180, 255)
         return (255, 255, 255)
 
-    def nms_center(boxes, types, dist=0.22):
+    def nms_center(boxes, types, dist=0.18):
         out_boxes = []
         out_types = []
 
         for i, b in enumerate(boxes):
             x, y, w, h = b
-            cx = x + w / 2
-            cy = y + h / 2
+            cx = x + w / 2.0
+            cy = y + h / 2.0
 
             duplicate = False
 
             for ob in out_boxes:
                 ox, oy, ow, oh = ob
-                ocx = ox + ow / 2
-                ocy = oy + oh / 2
+                ocx = ox + ow / 2.0
+                ocy = oy + oh / 2.0
 
                 if (
                     abs(cx - ocx) < min(w, ow) * dist and
@@ -163,6 +163,77 @@ def gen_pallet(img, debug=True):
                 out_types.append(types[i])
 
         return out_boxes, out_types
+
+    def box_iou(a, b):
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+
+        ax2 = ax + aw
+        ay2 = ay + ah
+        bx2 = bx + bw
+        by2 = by + bh
+
+        ix1 = max(ax, bx)
+        iy1 = max(ay, by)
+        ix2 = min(ax2, bx2)
+        iy2 = min(ay2, by2)
+
+        iw = max(0, ix2 - ix1)
+        ih = max(0, iy2 - iy1)
+
+        inter = iw * ih
+        union = aw * ah + bw * bh - inter
+
+        if union <= 0:
+            return 0.0
+
+        return inter / float(union)
+
+    def nms_iou_cells(cells, cell_types, iou_th=0.18):
+        if not cells:
+            return cells, cell_types
+
+        items = []
+
+        for i, b in enumerate(cells):
+            x, y, w, h = b
+            area = w * h
+            items.append((b, cell_types[i], area))
+
+        # ให้กล่องใหญ่/เต็มกว่ามาก่อน
+        items = sorted(items, key=lambda v: v[2], reverse=True)
+
+        keep_boxes = []
+        keep_types = []
+
+        for b, t, area in items:
+            duplicate = False
+
+            for old in keep_boxes:
+                if box_iou(b, old) > iou_th:
+                    duplicate = True
+                    break
+
+                x, y, w, h = b
+                ox, oy, ow, oh = old
+
+                ix1 = max(x, ox)
+                iy1 = max(y, oy)
+                ix2 = min(x + w, ox + ow)
+                iy2 = min(y + h, oy + oh)
+
+                inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                small_area = min(w * h, ow * oh)
+
+                if small_area > 0 and inter / float(small_area) > 0.55:
+                    duplicate = True
+                    break
+
+            if not duplicate:
+                keep_boxes.append(b)
+                keep_types.append(t)
+
+        return keep_boxes, keep_types
 
     # =========================
     # RESIZE + ROI
@@ -455,7 +526,42 @@ def gen_pallet(img, debug=True):
                 )
 
     # =========================
-    # ADDED FUNCTION:
+    # FILTER BAD CELLS
+    # กรอง cell ที่เล็ก / ผิดรูป / เป็นเศษชิ้นส่วน
+    # =========================
+    def filter_bad_cells(cells, cell_types):
+        new_cells = []
+        new_types = []
+
+        for i, (x, y, w, h) in enumerate(cells):
+            t = cell_types[i]
+            aspect = w / float(max(1, h))
+
+            # กรอง cell แคบ/เตี้ยเกิน
+            if w < rw * 0.055:
+                continue
+
+            if h < rh * 0.085:
+                continue
+
+            # กรอง cell ใหญ่ผิดปกติ
+            if w > rw * 0.30:
+                continue
+
+            if h > rh * 0.42:
+                continue
+
+            # cream / wood ควรเป็นกล่อง ไม่ใช่เส้นแถบ
+            if t in ["cream", "wood"]:
+                if aspect < 0.45 or aspect > 3.20:
+                    continue
+
+            new_cells.append((x, y, w, h))
+            new_types.append(t)
+
+        return new_cells, new_types
+
+    # =========================
     # JIGSAW NORMALIZE
     # ขยายกรอบเล็ก/เตี้ยให้ใกล้ขนาด pallet จริง
     # =========================
@@ -481,8 +587,8 @@ def gen_pallet(img, debug=True):
         for i, (x, y, w, h) in enumerate(cells):
             t = cell_types[i]
 
-            cx = x + w / 2
-            cy = y + h / 2
+            cx = x + w / 2.0
+            cy = y + h / 2.0
 
             nw = w
             nh = h
@@ -532,14 +638,23 @@ def gen_pallet(img, debug=True):
         return new_cells, new_types
 
     # =========================
-    # APPLY JIGSAW NORMALIZE
+    # APPLY POST PROCESSING
     # =========================
     cells, cell_types = normalize_jigsaw_cells(cells, cell_types)
 
-    # =========================
-    # REMOVE DUP
-    # =========================
-    cells, cell_types = nms_center(cells, cell_types, dist=0.22)
+    cells, cell_types = filter_bad_cells(cells, cell_types)
+
+    cells, cell_types = nms_iou_cells(
+        cells,
+        cell_types,
+        iou_th=0.18
+    )
+
+    cells, cell_types = nms_center(
+        cells,
+        cell_types,
+        dist=0.18
+    )
 
     # =========================
     # FINAL DRAW
@@ -601,7 +716,7 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET MATERIAL GRID + JIGSAW NORMALIZE")
+    print("PALLET MATERIAL GRID + FILTER + IOU NMS")
     print(f"BLOCKS : {len(blocks)}")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
