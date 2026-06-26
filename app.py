@@ -244,7 +244,7 @@ def gen_pallet(img, debug=True):
     material_mask = cv2.bitwise_or(material_mask, wood_mask)
 
     # =========================
-    # EDGES ใช้ช่วย block เท่านั้น
+    # EDGES ใช้ช่วยหา block เท่านั้น
     # =========================
     edges = cv2.Canny(
         cv2.GaussianBlur(gray, (5, 5), 0),
@@ -455,6 +455,7 @@ def gen_pallet(img, debug=True):
                 )
 
     # =========================
+    # ADDED FUNCTION:
     # JIGSAW NORMALIZE
     # ขยายกรอบเล็ก/เตี้ยให้ใกล้ขนาด pallet จริง
     # =========================
@@ -486,9 +487,11 @@ def gen_pallet(img, debug=True):
             nw = w
             nh = h
 
+            # กรอบเตี้ยเกิน เช่น ชิ้นส่วนฐาน/คาน ให้ขยายสูงขึ้น
             if h < ref_h * 0.55:
                 nh = ref_h
 
+            # กรอบแคบเกิน เช่น จับได้แค่เสา/บางส่วน ให้ขยายกว้างขึ้น
             if w < ref_w * 0.55:
                 nw = ref_w
 
@@ -528,6 +531,9 @@ def gen_pallet(img, debug=True):
 
         return new_cells, new_types
 
+    # =========================
+    # APPLY JIGSAW NORMALIZE
+    # =========================
     cells, cell_types = normalize_jigsaw_cells(cells, cell_types)
 
     # =========================
