@@ -420,7 +420,7 @@ def gen_pallet(img, debug=True):
 
     line_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
 
-    # ให้เส้นขอบที่อยู่ใกล้วัสดุมีน้ำหนักมากกว่าเส้นผนัง
+    # keep lines near material
     material_dilate = cv2.dilate(
         material_mask,
         cv2.getStructuringElement(cv2.MORPH_RECT, (31, 21)),
@@ -432,6 +432,7 @@ def gen_pallet(img, debug=True):
         material_dilate
     )
 
+    # allow lower-frame lines
     lower_zone = np.zeros_like(line_mask)
     lower_zone[int(rh * 0.34):bottom_cut, :] = 255
 
@@ -545,28 +546,27 @@ def gen_pallet(img, debug=True):
 
         lower_score = max(lg, lb, lc, lw, lf)
 
-        # ถ้าครึ่งล่างไม่มีขอบ/สีจริง ถือว่าเป็นผนังหรือเพดาน
         if lower_score < 0.006:
             return "unknown"
 
-        # เขียวมาก่อน เพราะ rack เขียวชัด
+        # green
         if g > 0.025 and lg > 0.010:
             return "green"
 
-        # น้ำเงินต้องชัดจริงมาก ๆ กันเงา/ผนังเพี้ยนเป็น blue
+        # blue: strict
         if (
-            b > 0.075 and
-            lb > 0.020 and
-            b > c * 2.0 and
-            b > g * 1.8
+            b > 0.090 and
+            lb > 0.030 and
+            b > c * 2.5 and
+            b > g * 2.0
         ):
             return "blue"
 
-        # ไม้ / carton
+        # wood
         if w > 0.035 and lw > 0.012 and w > c:
             return "wood"
 
-        # ครีม / cage / frame
+        # cream / frame
         if c > 0.012 or f > 0.006:
             return "cream"
 
@@ -617,29 +617,57 @@ def gen_pallet(img, debug=True):
         if ratios[block_type] < 0.006 and frame_ratio >= 0.006:
             block_type = "cream"
 
+        # =========================
+        # ESTIMATE GRID BY TYPE
+        # =========================
         if block_type == "green":
             est_cell_w = rw * 0.18
             est_cell_h = rh * 0.28
+            max_rows = 2
+            max_cols = 4
+
         elif block_type == "blue":
             est_cell_w = rw * 0.16
             est_cell_h = rh * 0.26
+            max_rows = 2
+            max_cols = 4
+
         elif block_type == "cream":
             est_cell_w = rw * 0.125
             est_cell_h = rh * 0.24
-        else:
+            max_rows = 3
+            max_cols = 6
+
+        elif block_type == "wood":
             est_cell_w = rw * 0.14
             est_cell_h = rh * 0.27
+            max_rows = 2
+            max_cols = 4
+
+        else:
+            est_cell_w = rw * 0.14
+            est_cell_h = rh * 0.26
+            max_rows = 2
+            max_cols = 4
 
         cols = int(round(w / max(1.0, est_cell_w)))
         rows = int(round(h / max(1.0, est_cell_h)))
 
-        cols = max(1, min(6, cols))
-        rows = max(1, min(3, rows))
+        cols = max(1, min(max_cols, cols))
+        rows = max(1, min(max_rows, rows))
 
-        if w > rw * 0.25 and cols < 2:
+        if w > est_cell_w * 1.70 and cols < 2:
             cols = 2
 
-        if h > rh * 0.34 and rows < 2:
+        if h > est_cell_h * 1.55 and rows < 2:
+            rows = 2
+
+        # cream can stack 3 layers
+        if block_type == "cream" and h > est_cell_h * 2.45:
+            rows = min(3, max_rows)
+
+        # green / blue max 2 layers
+        if block_type in ["green", "blue"] and rows > 2:
             rows = 2
 
         cv2.rectangle(
@@ -769,38 +797,75 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # SPLIT OVERSIZE CELLS
-    # ขนาดแต่ละสีไม่เท่ากัน
     # =========================
     def split_oversize_cells(cells, cell_types):
         new_cells = []
         new_types = []
 
         size_profile = {
-            "green": (rw * 0.18, rh * 0.28),
-            "blue": (rw * 0.16, rh * 0.26),
-            "cream": (rw * 0.125, rh * 0.24),
-            "wood": (rw * 0.14, rh * 0.27),
-            "unknown": (rw * 0.14, rh * 0.26)
+            "green": {
+                "target_w": rw * 0.18,
+                "target_h": rh * 0.28,
+                "max_cols": 4,
+                "max_rows": 2
+            },
+            "blue": {
+                "target_w": rw * 0.16,
+                "target_h": rh * 0.26,
+                "max_cols": 4,
+                "max_rows": 2
+            },
+            "cream": {
+                "target_w": rw * 0.125,
+                "target_h": rh * 0.24,
+                "max_cols": 6,
+                "max_rows": 3
+            },
+            "wood": {
+                "target_w": rw * 0.14,
+                "target_h": rh * 0.27,
+                "max_cols": 4,
+                "max_rows": 2
+            },
+            "unknown": {
+                "target_w": rw * 0.14,
+                "target_h": rh * 0.26,
+                "max_cols": 4,
+                "max_rows": 2
+            }
         }
 
         for i, (x, y, w, h) in enumerate(cells):
             original_type = cell_types[i]
 
-            target_w, target_h = size_profile.get(
+            profile = size_profile.get(
                 original_type,
                 size_profile["unknown"]
             )
+
+            target_w = profile["target_w"]
+            target_h = profile["target_h"]
+            max_cols = profile["max_cols"]
+            max_rows = profile["max_rows"]
 
             cols = 1
             rows = 1
 
             if w > target_w * 1.75:
                 cols = int(round(w / target_w))
-                cols = max(2, min(cols, 4))
+                cols = max(2, min(cols, max_cols))
 
-            if h > target_h * 1.65:
+            if h > target_h * 1.55:
                 rows = int(round(h / target_h))
-                rows = max(2, min(rows, 3))
+                rows = max(2, min(rows, max_rows))
+
+            # cream can stack 3 layers
+            if original_type == "cream" and h > target_h * 2.45:
+                rows = min(3, max_rows)
+
+            # green / blue max 2 layers
+            if original_type in ["green", "blue"] and rows > 2:
+                rows = 2
 
             for r in range(rows):
                 for c in range(cols):
@@ -947,7 +1012,7 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET FRAME SQUARE DETECTION + COLOR SIZE PROFILE")
+    print("PALLET FRAME SQUARE DETECTION + STACK BY TYPE")
     print(f"BLOCKS : {len(blocks)}")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
