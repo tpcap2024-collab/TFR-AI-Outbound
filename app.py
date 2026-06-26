@@ -10,6 +10,7 @@ app = Flask(__name__)
 
 # =========================
 # APPSHEET CONFIG
+# ใส่ค่าจริงเอง
 # =========================
 APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
 ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
@@ -27,6 +28,7 @@ os.makedirs(DEBUG_DIR, exist_ok=True)
 processed_ids = set()
 lock = threading.Lock()
 
+
 # =========================
 # DOWNLOAD IMAGE
 # =========================
@@ -34,17 +36,37 @@ def download_image(url):
     try:
         r = requests.get(
             url,
-            timeout=15,
-            headers={"User-Agent": "Mozilla/5.0"}
+            timeout=20,
+            allow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
         )
 
+        print("IMAGE STATUS:", r.status_code)
+        print("IMAGE CONTENT TYPE:", r.headers.get("Content-Type"))
+
         if r.status_code != 200:
+            print("IMAGE HTTP ERROR:", r.status_code)
+            print(r.text[:300])
             return None
 
-        img = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)
+        img = cv2.imdecode(
+            np.frombuffer(r.content, np.uint8),
+            cv2.IMREAD_COLOR
+        )
+
+        if img is None:
+            print("IMAGE DECODE FAILED")
+            return None
+
+        print("IMAGE SHAPE:", img.shape)
+
         return img
 
-    except:
+    except Exception as e:
+        print("DOWNLOAD ERROR:", e)
+        print(traceback.format_exc())
         return None
 
 
@@ -52,47 +74,101 @@ def download_image(url):
 # DEBUG SAVE
 # =========================
 def save_debug(name, img):
-    if img is None:
-        return
-    cv2.imwrite(os.path.join(DEBUG_DIR, name), img)
+    try:
+        if img is None:
+            print("SAVE DEBUG ERROR:", name, "image is None")
+            return False
+
+        path = os.path.join(DEBUG_DIR, name)
+
+        ok = cv2.imwrite(path, img)
+
+        exists = os.path.exists(path)
+        size = os.path.getsize(path) if exists else 0
+
+        print(
+            f"SAVE DEBUG {name}: "
+            f"ok={ok} exists={exists} size={size} path={path}"
+        )
+
+        return ok
+
+    except Exception as e:
+        print("SAVE DEBUG ERROR:", name, e)
+        print(traceback.format_exc())
+        return False
 
 
 # =========================
-# OUTBOUND (ง่าย version)
+# OUTBOUND VOLUME MODEL
 # =========================
 def gen_volume(img, debug=True, return_empty=False):
+
+    if img is None or img.size == 0:
+        return 0
 
     img = cv2.resize(img, (640, 480))
     h, w = img.shape[:2]
 
-    roi = img[int(h*0.25):int(h*0.80), int(w*0.1):int(w*0.9)]
+    roi = img[
+        int(h * 0.25):int(h * 0.80),
+        int(w * 0.10):int(w * 0.90)
+    ]
+
+    if roi.size == 0:
+        return 0
 
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 
-    green = cv2.inRange(hsv, (35, 50, 50), (90,255,255))
-    brown = cv2.inRange(hsv, (5,40,40), (35,255,255))
-    blue  = cv2.inRange(hsv, (85,40,40), (130,255,255))
-    dark  = cv2.inRange(hsv, (0,0,0), (180,255,60))
+    green = cv2.inRange(hsv, (35, 50, 50), (90, 255, 255))
+    brown = cv2.inRange(hsv, (5, 40, 40), (35, 255, 255))
+    blue = cv2.inRange(hsv, (85, 40, 40), (130, 255, 255))
+    dark = cv2.inRange(hsv, (0, 0, 0), (180, 255, 60))
 
     edges = cv2.Canny(gray, 40, 120)
 
-    cargo = green | brown | blue | dark | edges
+    cargo = cv2.bitwise_or(green, brown)
+    cargo = cv2.bitwise_or(cargo, blue)
+    cargo = cv2.bitwise_or(cargo, dark)
+    cargo = cv2.bitwise_or(cargo, edges)
 
-    filled = cv2.countNonZero(cargo) / cargo.size * 100
+    cargo = cv2.morphologyEx(
+        cargo,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)),
+        iterations=1
+    )
+
+    filled = cv2.countNonZero(cargo) / float(max(1, cargo.size)) * 100
     filled = min(100, filled)
 
-    result = (100-filled) if return_empty else filled
-    result = int(round(result/5)*5)
+    result = (100 - filled) if return_empty else filled
+    result = int(round(result / 5) * 5)
+    result = max(0, min(100, result))
 
     if debug:
         overlay = roi.copy()
-        overlay[cargo > 0] = (0,255,0)
+        overlay[cargo > 0] = (0, 255, 0)
+
+        empty = cv2.bitwise_not(cargo)
+
+        save_debug("debug_original.jpg", roi)
+        save_debug("debug_cargo.jpg", cargo)
+        save_debug("debug_empty.jpg", empty)
         save_debug("debug_overlay.jpg", overlay)
+
+    print("=" * 50)
+    print("VOLUME RESULT:", result)
+    print("=" * 50)
 
     return result
 
 
+# =========================
+# INBOUND PALLET MODEL
+# Edge / Frame detection: cream + green + wood
+# =========================
 def gen_pallet(img, debug=True):
 
     if img is None or img.size == 0:
@@ -101,10 +177,8 @@ def gen_pallet(img, debug=True):
     # =========================
     # PARAMS
     # =========================
-    TOP_CUT_RATIO = 0.30       # ตัดผนัง/เพดานด้านบน
-    BOTTOM_CUT_RATIO = 0.82    # ตัดล้อ/คานล่าง
-    MIN_CELL_MATERIAL = 0.006
-    MIN_CELL_LINE = 0.006
+    TOP_CUT_RATIO = 0.30
+    BOTTOM_CUT_RATIO = 0.82
 
     # =========================
     # HELPERS
@@ -117,10 +191,20 @@ def gen_pallet(img, debug=True):
         ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
 
         if close_it > 0:
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, ker, iterations=close_it)
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_CLOSE,
+                ker,
+                iterations=close_it
+            )
 
         if open_it > 0:
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker, iterations=open_it)
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_OPEN,
+                ker,
+                iterations=open_it
+            )
 
         return mask
 
@@ -163,6 +247,7 @@ def gen_pallet(img, debug=True):
             return cells, types
 
         items = []
+
         for i, b in enumerate(cells):
             x, y, w, h = b
             items.append((b, types[i], w * h))
@@ -224,18 +309,22 @@ def gen_pallet(img, debug=True):
     # =========================
     # MATERIAL MASKS
     # =========================
+
+    # green rack
     green_mask = cv2.inRange(
         hsv,
         (30, 30, 30),
         (95, 255, 255)
     )
 
+    # cream / beige rack or cage
     cream_mask = cv2.inRange(
         hsv,
         (5, 25, 75),
         (45, 185, 255)
     )
 
+    # wood / carton
     wood_mask = cv2.inRange(
         hsv,
         (5, 35, 45),
@@ -289,7 +378,7 @@ def gen_pallet(img, debug=True):
     edge_base[:top_cut, :] = 0
     edge_base[bottom_cut:, :] = 0
 
-    # เส้นตั้งของกรง/rack
+    # vertical lines
     vertical_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (3, max(18, int(rh * 0.08)))
@@ -302,7 +391,7 @@ def gen_pallet(img, debug=True):
         iterations=1
     )
 
-    # เส้นนอนของกรง/rack
+    # horizontal lines
     horizontal_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (max(30, int(rw * 0.045)), 3)
@@ -317,16 +406,19 @@ def gen_pallet(img, debug=True):
 
     line_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
 
-    # ตัด line ที่ลอยบนผนังมากเกินไป โดยให้ใกล้ material หรืออยู่ในโซนล่างของสินค้า
+    # keep lines near material
     material_dilate = cv2.dilate(
         material_mask,
         cv2.getStructuringElement(cv2.MORPH_RECT, (25, 17)),
         iterations=1
     )
 
-    line_near_material = cv2.bitwise_and(line_mask, material_dilate)
+    line_near_material = cv2.bitwise_and(
+        line_mask,
+        material_dilate
+    )
 
-    # สำหรับกรงครีมที่สีติดน้อย อนุญาตเส้นในช่วงล่างของ cargo
+    # allow lower cage lines
     lower_zone = np.zeros_like(line_mask)
     lower_zone[int(rh * 0.38):bottom_cut, :] = 255
 
@@ -514,7 +606,6 @@ def gen_pallet(img, debug=True):
                 material_score = max(g, cr, wo)
                 frame_score = max(material_score, li)
 
-                # check lower half
                 lower_y1 = y1 + int(ch * 0.45)
                 lower_area = float(max(1, (y2 - lower_y1) * cw))
 
@@ -531,7 +622,6 @@ def gen_pallet(img, debug=True):
                 if lower_score < 0.004:
                     continue
 
-                # กันโซนสูง/ผนัง
                 if y1 < rh * 0.35 and frame_score < 0.018:
                     continue
 
@@ -652,7 +742,7 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET EDGE/FRAME DETECTION V2")
+    print("PALLET EDGE / FRAME DETECTION")
     print(f"BLOCKS : {len(blocks)}")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
@@ -666,7 +756,7 @@ def gen_pallet(img, debug=True):
         save_dbg("debug_green_mask.jpg", green_mask)
         save_dbg("debug_cream_mask.jpg", cream_mask)
         save_dbg("debug_wood_mask.jpg", wood_mask)
-        save_dbg("debug_edges.jpg", edges)
+        save_dbg("debug_edges.jpg", edge_base)
         save_dbg("debug_line_mask.jpg", line_mask)
         save_dbg("debug_frame_mask.jpg", frame_mask)
         save_dbg("debug_cargo.jpg", cargo_mask)
@@ -674,7 +764,6 @@ def gen_pallet(img, debug=True):
         save_dbg("debug_pallet_box.jpg", debug_box)
 
     return total
-    
 # =========================
 # APPSHEET
 # =========================
