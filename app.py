@@ -98,9 +98,6 @@ def gen_pallet(img, debug=True):
     if img is None or img.size == 0:
         return 0
 
-    # =========================
-    # HELPERS
-    # =========================
     def save_dbg(name, im):
         if debug and im is not None:
             save_debug(name, im)
@@ -109,20 +106,10 @@ def gen_pallet(img, debug=True):
         ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
 
         if close_it > 0:
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_CLOSE,
-                ker,
-                iterations=close_it
-            )
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, ker, iterations=close_it)
 
         if open_it > 0:
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_OPEN,
-                ker,
-                iterations=open_it
-            )
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker, iterations=open_it)
 
         return mask
 
@@ -134,35 +121,6 @@ def gen_pallet(img, debug=True):
         if t == "wood":
             return (0, 180, 255)
         return (255, 255, 255)
-
-    def nms_center(boxes, types, dist=0.18):
-        out_boxes = []
-        out_types = []
-
-        for i, b in enumerate(boxes):
-            x, y, w, h = b
-            cx = x + w / 2.0
-            cy = y + h / 2.0
-
-            duplicate = False
-
-            for ob in out_boxes:
-                ox, oy, ow, oh = ob
-                ocx = ox + ow / 2.0
-                ocy = oy + oh / 2.0
-
-                if (
-                    abs(cx - ocx) < min(w, ow) * dist and
-                    abs(cy - ocy) < min(h, oh) * dist
-                ):
-                    duplicate = True
-                    break
-
-            if not duplicate:
-                out_boxes.append(b)
-                out_types.append(types[i])
-
-        return out_boxes, out_types
 
     def box_iou(a, b):
         ax, ay, aw, ah = a
@@ -189,18 +147,16 @@ def gen_pallet(img, debug=True):
 
         return inter / float(union)
 
-    def nms_iou_cells(cells, cell_types, iou_th=0.18):
+    def nms_iou(cells, types, iou_th=0.22):
         if not cells:
-            return cells, cell_types
+            return cells, types
 
         items = []
 
         for i, b in enumerate(cells):
             x, y, w, h = b
-            area = w * h
-            items.append((b, cell_types[i], area))
+            items.append((b, types[i], w * h))
 
-        # ให้กล่องใหญ่/เต็มกว่ามาก่อน
         items = sorted(items, key=lambda v: v[2], reverse=True)
 
         keep_boxes = []
@@ -211,21 +167,6 @@ def gen_pallet(img, debug=True):
 
             for old in keep_boxes:
                 if box_iou(b, old) > iou_th:
-                    duplicate = True
-                    break
-
-                x, y, w, h = b
-                ox, oy, ow, oh = old
-
-                ix1 = max(x, ox)
-                iy1 = max(y, oy)
-                ix2 = min(x + w, ox + ow)
-                iy2 = min(y + h, oy + oh)
-
-                inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-                small_area = min(w * h, ow * oh)
-
-                if small_area > 0 and inter / float(small_area) > 0.55:
                     duplicate = True
                     break
 
@@ -278,17 +219,18 @@ def gen_pallet(img, debug=True):
         (95, 255, 255)
     )
 
-    # cream / beige cage
+    # cream/beige cargo/rack
+    # เพิ่ม S ขั้นต่ำเพื่อลดการจับผนังเทา/เพดาน
     cream_mask = cv2.inRange(
         hsv,
-        (5, 15, 75),
-        (45, 170, 255)
+        (5, 32, 70),
+        (45, 190, 255)
     )
 
-    # wood / carton
+    # wood/carton
     wood_mask = cv2.inRange(
         hsv,
-        (5, 35, 50),
+        (5, 35, 45),
         (38, 230, 245)
     )
 
@@ -304,9 +246,6 @@ def gen_pallet(img, debug=True):
         m[:, :int(rw * 0.01)] = 0
         m[:, int(rw * 0.99):] = 0
 
-    # =========================
-    # CLEAN MASKS
-    # =========================
     green_mask = clean(green_mask, 5, 1, 1)
     cream_mask = clean(cream_mask, 5, 1, 1)
     wood_mask = clean(wood_mask, 5, 1, 1)
@@ -315,7 +254,7 @@ def gen_pallet(img, debug=True):
     material_mask = cv2.bitwise_or(material_mask, wood_mask)
 
     # =========================
-    # EDGES ใช้ช่วยหา block เท่านั้น
+    # EDGE ใช้ช่วยเฉพาะใกล้ material
     # =========================
     edges = cv2.Canny(
         cv2.GaussianBlur(gray, (5, 5), 0),
@@ -328,7 +267,7 @@ def gen_pallet(img, debug=True):
 
     material_dilate = cv2.dilate(
         material_mask,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (17, 11)),
         iterations=1
     )
 
@@ -363,9 +302,8 @@ def gen_pallet(img, debug=True):
 
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
-        area = w * h
 
-        if area < rw * rh * 0.004:
+        if w * h < rw * rh * 0.004:
             continue
 
         if w < rw * 0.045:
@@ -377,47 +315,40 @@ def gen_pallet(img, debug=True):
         if y + h > bottom_cut:
             continue
 
-        if h > rh * 0.60:
+        if h > rh * 0.55:
             continue
 
         block_material = material_mask[y:y + h, x:x + w]
-        material_density = cv2.countNonZero(block_material) / float(max(1, w * h))
+        block_density = cv2.countNonZero(block_material) / float(max(1, w * h))
 
-        if material_density < 0.012:
+        if block_density < 0.010:
             continue
 
         blocks.append((x, y, w, h))
 
     blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
 
-    # =========================
-    # SPLIT BLOCK เป็น CELL
-    # =========================
     cells = []
     cell_types = []
 
-    debug_box = roi.copy()
     debug_grid = roi.copy()
+    debug_box = roi.copy()
+    debug_reject = roi.copy()
 
+    # =========================
+    # SPLIT BLOCKS
+    # =========================
     for (x, y, w, h) in blocks:
 
         block_area = float(max(1, w * h))
 
-        green_ratio = cv2.countNonZero(
-            green_mask[y:y + h, x:x + w]
-        ) / block_area
+        g_ratio = cv2.countNonZero(green_mask[y:y+h, x:x+w]) / block_area
+        c_ratio = cv2.countNonZero(cream_mask[y:y+h, x:x+w]) / block_area
+        w_ratio = cv2.countNonZero(wood_mask[y:y+h, x:x+w]) / block_area
 
-        cream_ratio = cv2.countNonZero(
-            cream_mask[y:y + h, x:x + w]
-        ) / block_area
-
-        wood_ratio = cv2.countNonZero(
-            wood_mask[y:y + h, x:x + w]
-        ) / block_area
-
-        if green_ratio >= max(cream_ratio, wood_ratio):
+        if g_ratio >= max(c_ratio, w_ratio):
             block_type = "green"
-        elif cream_ratio >= max(green_ratio, wood_ratio):
+        elif c_ratio >= max(g_ratio, w_ratio):
             block_type = "cream"
         else:
             block_type = "wood"
@@ -432,7 +363,7 @@ def gen_pallet(img, debug=True):
             est_cell_w = rw * 0.125
             est_cell_h = rh * 0.25
         else:
-            est_cell_w = rw * 0.140
+            est_cell_w = rw * 0.14
             est_cell_h = rh * 0.28
 
         cols = int(round(w / max(1.0, est_cell_w)))
@@ -471,6 +402,7 @@ def gen_pallet(img, debug=True):
         # =========================
         for r in range(rows):
             for c in range(cols):
+
                 x1 = x + int(c * w / cols)
                 x2 = x + int((c + 1) * w / cols)
                 y1 = y + int(r * h / rows)
@@ -490,6 +422,7 @@ def gen_pallet(img, debug=True):
 
                 cell_area = float(max(1, cw * ch))
 
+                # full cell material
                 cell_green = cv2.countNonZero(
                     green_mask[y1:y2, x1:x2]
                 ) / cell_area
@@ -504,7 +437,40 @@ def gen_pallet(img, debug=True):
 
                 material_score = max(cell_green, cell_cream, cell_wood)
 
+                # =========================
+                # สำคัญมาก:
+                # ตรวจครึ่งล่างของ cell
+                # ถ้าเป็นผนัง/เพดาน จะไม่มี material ในครึ่งล่าง
+                # =========================
+                lower_y1 = y1 + int(ch * 0.45)
+                lower_area = float(max(1, (y2 - lower_y1) * cw))
+
+                lower_green = cv2.countNonZero(
+                    green_mask[lower_y1:y2, x1:x2]
+                ) / lower_area
+
+                lower_cream = cv2.countNonZero(
+                    cream_mask[lower_y1:y2, x1:x2]
+                ) / lower_area
+
+                lower_wood = cv2.countNonZero(
+                    wood_mask[lower_y1:y2, x1:x2]
+                ) / lower_area
+
+                lower_score = max(lower_green, lower_cream, lower_wood)
+
+                # cell ที่เป็นผนัง/เพดานจะตกเงื่อนไขนี้
                 if material_score < 0.012:
+                    cv2.rectangle(debug_reject, (x1, y1), (x2, y2), (80, 80, 80), 1)
+                    continue
+
+                if lower_score < 0.010:
+                    cv2.rectangle(debug_reject, (x1, y1), (x2, y2), (150, 150, 150), 1)
+                    continue
+
+                # extra reject: cell อยู่สูงเกินและ material ต่ำ
+                if y1 < rh * 0.35 and material_score < 0.025:
+                    cv2.rectangle(debug_reject, (x1, y1), (x2, y2), (200, 200, 200), 1)
                     continue
 
                 if cell_green >= max(cell_cream, cell_wood):
@@ -527,7 +493,6 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # FILTER BAD CELLS
-    # กรอง cell ที่เล็ก / ผิดรูป / เป็นเศษชิ้นส่วน
     # =========================
     def filter_bad_cells(cells, cell_types):
         new_cells = []
@@ -537,23 +502,20 @@ def gen_pallet(img, debug=True):
             t = cell_types[i]
             aspect = w / float(max(1, h))
 
-            # กรอง cell แคบ/เตี้ยเกิน
-            if w < rw * 0.055:
+            if w < rw * 0.050:
                 continue
 
-            if h < rh * 0.085:
+            if h < rh * 0.070:
                 continue
 
-            # กรอง cell ใหญ่ผิดปกติ
-            if w > rw * 0.30:
+            if w > rw * 0.32:
                 continue
 
             if h > rh * 0.42:
                 continue
 
-            # cream / wood ควรเป็นกล่อง ไม่ใช่เส้นแถบ
             if t in ["cream", "wood"]:
-                if aspect < 0.45 or aspect > 3.20:
+                if aspect < 0.40 or aspect > 3.50:
                     continue
 
             new_cells.append((x, y, w, h))
@@ -563,7 +525,6 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # JIGSAW NORMALIZE
-    # ขยายกรอบเล็ก/เตี้ยให้ใกล้ขนาด pallet จริง
     # =========================
     def normalize_jigsaw_cells(cells, cell_types):
         if not cells:
@@ -593,11 +554,9 @@ def gen_pallet(img, debug=True):
             nw = w
             nh = h
 
-            # กรอบเตี้ยเกิน เช่น ชิ้นส่วนฐาน/คาน ให้ขยายสูงขึ้น
             if h < ref_h * 0.55:
                 nh = ref_h
 
-            # กรอบแคบเกิน เช่น จับได้แค่เสา/บางส่วน ให้ขยายกว้างขึ้น
             if w < ref_w * 0.55:
                 nw = ref_w
 
@@ -629,7 +588,19 @@ def gen_pallet(img, debug=True):
 
             material_score = max(g, c, wmat)
 
+            lower_y1 = y1 + int((y2 - y1) * 0.45)
+            lower_area = float(max(1, (y2 - lower_y1) * (x2 - x1)))
+
+            lg = cv2.countNonZero(green_mask[lower_y1:y2, x1:x2]) / lower_area
+            lc = cv2.countNonZero(cream_mask[lower_y1:y2, x1:x2]) / lower_area
+            lw = cv2.countNonZero(wood_mask[lower_y1:y2, x1:x2]) / lower_area
+
+            lower_score = max(lg, lc, lw)
+
             if material_score < 0.010:
+                continue
+
+            if lower_score < 0.008:
                 continue
 
             new_cells.append((x1, y1, x2 - x1, y2 - y1))
@@ -638,23 +609,11 @@ def gen_pallet(img, debug=True):
         return new_cells, new_types
 
     # =========================
-    # APPLY POST PROCESSING
+    # POST PROCESSING
     # =========================
     cells, cell_types = normalize_jigsaw_cells(cells, cell_types)
-
     cells, cell_types = filter_bad_cells(cells, cell_types)
-
-    cells, cell_types = nms_iou_cells(
-        cells,
-        cell_types,
-        iou_th=0.18
-    )
-
-    cells, cell_types = nms_center(
-        cells,
-        cell_types,
-        dist=0.18
-    )
+    cells, cell_types = nms_iou(cells, cell_types, iou_th=0.22)
 
     # =========================
     # FINAL DRAW
@@ -716,7 +675,7 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET MATERIAL GRID + FILTER + IOU NMS")
+    print("PALLET MATERIAL GRID + LOWER MATERIAL CHECK")
     print(f"BLOCKS : {len(blocks)}")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
@@ -724,9 +683,6 @@ def gen_pallet(img, debug=True):
     print(f"WOOD   : {counts['wood']}")
     print("=" * 50)
 
-    # =========================
-    # DEBUG SAVE
-    # =========================
     if debug:
         save_dbg("debug_original.jpg", roi)
         save_dbg("debug_normalized.jpg", norm)
@@ -736,10 +692,10 @@ def gen_pallet(img, debug=True):
         save_dbg("debug_edges.jpg", edges)
         save_dbg("debug_cargo.jpg", cargo_mask)
         save_dbg("debug_grid.jpg", debug_grid)
+        save_dbg("debug_reject.jpg", debug_reject)
         save_dbg("debug_pallet_box.jpg", debug_box)
 
     return total
-
 # =========================
 # APPSHEET
 # =========================
