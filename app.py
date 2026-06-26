@@ -246,8 +246,7 @@ def gen_pallet(img, debug=True):
 
         for i, b in enumerate(boxes):
             x, y, w, h = b
-            area = w * h
-            items.append((b, types[i], area))
+            items.append((b, types[i], w * h))
 
         items = sorted(items, key=lambda v: v[2], reverse=True)
 
@@ -296,7 +295,7 @@ def gen_pallet(img, debug=True):
 
     rh, rw = roi.shape[:2]
 
-    top_cut = int(rh * 0.28)
+    top_cut = int(rh * 0.22)
     bottom_cut = int(rh * 0.82)
 
     # =========================
@@ -396,7 +395,7 @@ def gen_pallet(img, debug=True):
 
     vertical_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (3, max(20, int(rh * 0.08)))
+        (3, max(18, int(rh * 0.08)))
     )
 
     vertical_lines = cv2.morphologyEx(
@@ -408,7 +407,7 @@ def gen_pallet(img, debug=True):
 
     horizontal_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (max(30, int(rw * 0.045)), 3)
+        (max(28, int(rw * 0.045)), 3)
     )
 
     horizontal_lines = cv2.morphologyEx(
@@ -420,7 +419,7 @@ def gen_pallet(img, debug=True):
 
     line_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
 
-    # keep lines near material
+    # ให้เส้นที่อยู่ใกล้วัสดุมีน้ำหนัก
     material_dilate = cv2.dilate(
         material_mask,
         cv2.getStructuringElement(cv2.MORPH_RECT, (31, 21)),
@@ -432,9 +431,9 @@ def gen_pallet(img, debug=True):
         material_dilate
     )
 
-    # allow lower-frame lines
+    # อนุญาตเส้นกรงในโซนล่างสินค้า
     lower_zone = np.zeros_like(line_mask)
-    lower_zone[int(rh * 0.34):bottom_cut, :] = 255
+    lower_zone[int(rh * 0.32):bottom_cut, :] = 255
 
     line_lower = cv2.bitwise_and(
         line_mask,
@@ -449,7 +448,7 @@ def gen_pallet(img, debug=True):
     frame_mask = cv2.morphologyEx(
         frame_mask,
         cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (13, 9)),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (11, 7)),
         iterations=1
     )
 
@@ -464,19 +463,159 @@ def gen_pallet(img, debug=True):
     pallet_seed = cv2.morphologyEx(
         pallet_seed,
         cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (15, 9)),
-        iterations=2
+        cv2.getStructuringElement(cv2.MORPH_RECT, (11, 7)),
+        iterations=1
     )
 
     pallet_seed = cv2.morphologyEx(
         pallet_seed,
         cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
         iterations=1
     )
 
     # =========================
-    # FIND BLOCKS
+    # CLASSIFY BY BORDER
+    # =========================
+    def classify_by_border(x, y, w, h):
+        x1 = x
+        y1 = y
+        x2 = x + w
+        y2 = y + h
+
+        if w <= 0 or h <= 0:
+            return "unknown"
+
+        border = max(6, int(min(w, h) * 0.12))
+        border_mask = np.zeros((h, w), dtype=np.uint8)
+
+        border_mask[:border, :] = 255
+        border_mask[h - border:, :] = 255
+        border_mask[:, :border] = 255
+        border_mask[:, w - border:] = 255
+
+        area = float(max(1, cv2.countNonZero(border_mask)))
+
+        g_crop = green_mask[y1:y2, x1:x2]
+        b_crop = blue_mask[y1:y2, x1:x2]
+        c_crop = cream_mask[y1:y2, x1:x2]
+        w_crop = wood_mask[y1:y2, x1:x2]
+        f_crop = frame_mask[y1:y2, x1:x2]
+
+        g = cv2.countNonZero(cv2.bitwise_and(g_crop, border_mask)) / area
+        b = cv2.countNonZero(cv2.bitwise_and(b_crop, border_mask)) / area
+        c = cv2.countNonZero(cv2.bitwise_and(c_crop, border_mask)) / area
+        wd = cv2.countNonZero(cv2.bitwise_and(w_crop, border_mask)) / area
+        fr = cv2.countNonZero(cv2.bitwise_and(f_crop, border_mask)) / area
+
+        # เช็กครึ่งล่างกันผนัง / ช่องว่าง
+        lower_y1 = y + int(h * 0.45)
+        lower_area = float(max(1, (y + h - lower_y1) * w))
+
+        lg = cv2.countNonZero(green_mask[lower_y1:y + h, x:x + w]) / lower_area
+        lb = cv2.countNonZero(blue_mask[lower_y1:y + h, x:x + w]) / lower_area
+        lc = cv2.countNonZero(cream_mask[lower_y1:y + h, x:x + w]) / lower_area
+        lw = cv2.countNonZero(wood_mask[lower_y1:y + h, x:x + w]) / lower_area
+        lf = cv2.countNonZero(frame_mask[lower_y1:y + h, x:x + w]) / lower_area
+
+        lower_score = max(lg, lb, lc, lw, lf)
+
+        if lower_score < 0.006:
+            return "unknown"
+
+        # blue ต้องชัดที่ขอบ
+        if (
+            b > 0.035 and
+            b > g * 1.3 and
+            b > c * 1.5
+        ):
+            return "blue"
+
+        # green
+        if (
+            g > 0.025 and
+            g > b * 1.2 and
+            g > c * 1.2
+        ):
+            return "green"
+
+        # wood / carton
+        if wd > 0.045 and wd > c * 1.2 and wd > g:
+            return "wood"
+
+        # cream / frame
+        if c > 0.012 or fr > 0.010:
+            return "cream"
+
+        return "unknown"
+
+    # =========================
+    # VALID PALLET BOX
+    # ต้องไม่เล็ก ไม่แบน ไม่ใหญ่เกิน
+    # =========================
+    def valid_pallet_box(x, y, w, h):
+        if y < top_cut:
+            return False
+
+        if y + h > bottom_cut:
+            return False
+
+        # ห้ามเล็ก
+        if w < rw * 0.075:
+            return False
+
+        if h < rh * 0.120:
+            return False
+
+        # ห้ามใหญ่ครอบทั้งชุด
+        if w > rw * 0.38:
+            return False
+
+        if h > rh * 0.55:
+            return False
+
+        aspect = w / float(max(1, h))
+
+        # ห้ามแบน / ห้ามเป็นเสาแคบ
+        if aspect < 0.45:
+            return False
+
+        if aspect > 2.80:
+            return False
+
+        area = float(max(1, w * h))
+
+        mat_den = cv2.countNonZero(
+            material_mask[y:y + h, x:x + w]
+        ) / area
+
+        frame_den = cv2.countNonZero(
+            frame_mask[y:y + h, x:x + w]
+        ) / area
+
+        # ต้องมีสีหรือขอบจริง
+        if mat_den < 0.004 and frame_den < 0.006:
+            return False
+
+        # ครึ่งล่างต้องมีหลักฐาน
+        lower_y1 = y + int(h * 0.45)
+        lower_area = float(max(1, (y + h - lower_y1) * w))
+
+        lower_mat = cv2.countNonZero(
+            material_mask[lower_y1:y + h, x:x + w]
+        ) / lower_area
+
+        lower_frame = cv2.countNonZero(
+            frame_mask[lower_y1:y + h, x:x + w]
+        ) / lower_area
+
+        if max(lower_mat, lower_frame) < 0.006:
+            return False
+
+        return True
+
+    # =========================
+    # FIND RECTANGLE / FRAME CANDIDATES
     # =========================
     contours, _ = cv2.findContours(
         pallet_seed,
@@ -484,325 +623,32 @@ def gen_pallet(img, debug=True):
         cv2.CHAIN_APPROX_SIMPLE
     )
 
-    blocks = []
+    candidates = []
+    candidate_types = []
 
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
-        area = w * h
 
-        if area < rw * rh * 0.003:
+        if not valid_pallet_box(x, y, w, h):
             continue
 
-        if w < rw * 0.04:
+        t = classify_by_border(x, y, w, h)
+
+        if t == "unknown":
             continue
 
-        if h < rh * 0.06:
-            continue
-
-        if y + h > bottom_cut:
-            continue
-
-        if h > rh * 0.58:
-            continue
-
-        box_area = float(max(1, w * h))
-
-        mat_den = cv2.countNonZero(
-            material_mask[y:y + h, x:x + w]
-        ) / box_area
-
-        frame_den = cv2.countNonZero(
-            frame_mask[y:y + h, x:x + w]
-        ) / box_area
-
-        if mat_den < 0.004 and frame_den < 0.004:
-            continue
-
-        blocks.append((x, y, w, h))
-
-    blocks = sorted(blocks, key=lambda v: (v[1], v[0]))
+        candidates.append((x, y, w, h))
+        candidate_types.append(t)
 
     # =========================
-    # CLASSIFY COLOR CELL
+    # SPLIT BIG CANDIDATES BY TYPE
+    # เฉพาะกรอบที่ใหญ่เกินจริง
     # =========================
-    def classify_color_cell(x1, y1, x2, y2):
-        area = float(max(1, (x2 - x1) * (y2 - y1)))
-
-        g = cv2.countNonZero(green_mask[y1:y2, x1:x2]) / area
-        b = cv2.countNonZero(blue_mask[y1:y2, x1:x2]) / area
-        c = cv2.countNonZero(cream_mask[y1:y2, x1:x2]) / area
-        w = cv2.countNonZero(wood_mask[y1:y2, x1:x2]) / area
-        f = cv2.countNonZero(frame_mask[y1:y2, x1:x2]) / area
-
-        h = y2 - y1
-        lower_y1 = y1 + int(h * 0.45)
-        lower_area = float(max(1, (y2 - lower_y1) * (x2 - x1)))
-
-        lg = cv2.countNonZero(green_mask[lower_y1:y2, x1:x2]) / lower_area
-        lb = cv2.countNonZero(blue_mask[lower_y1:y2, x1:x2]) / lower_area
-        lc = cv2.countNonZero(cream_mask[lower_y1:y2, x1:x2]) / lower_area
-        lw = cv2.countNonZero(wood_mask[lower_y1:y2, x1:x2]) / lower_area
-        lf = cv2.countNonZero(frame_mask[lower_y1:y2, x1:x2]) / lower_area
-
-        lower_score = max(lg, lb, lc, lw, lf)
-
-        if lower_score < 0.006:
-            return "unknown"
-
-        # green
-        if g > 0.025 and lg > 0.010:
-            return "green"
-
-        # blue: strict
-        if (
-            b > 0.090 and
-            lb > 0.030 and
-            b > c * 2.5 and
-            b > g * 2.0
-        ):
-            return "blue"
-
-        # wood
-        if w > 0.035 and lw > 0.012 and w > c:
-            return "wood"
-
-        # cream / frame
-        if c > 0.012 or f > 0.006:
-            return "cream"
-
-        return "unknown"
-
-    # =========================
-    # BUILD INITIAL CELLS
-    # =========================
-    cells = []
-    cell_types = []
-
-    debug_grid = roi.copy()
-    debug_box = roi.copy()
-
-    for (x, y, w, h) in blocks:
-
-        block_area = float(max(1, w * h))
-
-        g_ratio = cv2.countNonZero(
-            green_mask[y:y + h, x:x + w]
-        ) / block_area
-
-        b_ratio = cv2.countNonZero(
-            blue_mask[y:y + h, x:x + w]
-        ) / block_area
-
-        c_ratio = cv2.countNonZero(
-            cream_mask[y:y + h, x:x + w]
-        ) / block_area
-
-        wd_ratio = cv2.countNonZero(
-            wood_mask[y:y + h, x:x + w]
-        ) / block_area
-
-        frame_ratio = cv2.countNonZero(
-            frame_mask[y:y + h, x:x + w]
-        ) / block_area
-
-        ratios = {
-            "green": g_ratio,
-            "blue": b_ratio,
-            "cream": c_ratio,
-            "wood": wd_ratio
-        }
-
-        block_type = max(ratios, key=ratios.get)
-
-        if ratios[block_type] < 0.006 and frame_ratio >= 0.006:
-            block_type = "cream"
-
-        # =========================
-        # ESTIMATE GRID BY TYPE
-        # =========================
-        if block_type == "green":
-            est_cell_w = rw * 0.18
-            est_cell_h = rh * 0.28
-            max_rows = 2
-            max_cols = 4
-
-        elif block_type == "blue":
-            est_cell_w = rw * 0.16
-            est_cell_h = rh * 0.26
-            max_rows = 2
-            max_cols = 4
-
-        elif block_type == "cream":
-            est_cell_w = rw * 0.125
-            est_cell_h = rh * 0.24
-            max_rows = 3
-            max_cols = 6
-
-        elif block_type == "wood":
-            est_cell_w = rw * 0.14
-            est_cell_h = rh * 0.27
-            max_rows = 2
-            max_cols = 4
-
-        else:
-            est_cell_w = rw * 0.14
-            est_cell_h = rh * 0.26
-            max_rows = 2
-            max_cols = 4
-
-        cols = int(round(w / max(1.0, est_cell_w)))
-        rows = int(round(h / max(1.0, est_cell_h)))
-
-        cols = max(1, min(max_cols, cols))
-        rows = max(1, min(max_rows, rows))
-
-        if w > est_cell_w * 1.70 and cols < 2:
-            cols = 2
-
-        if h > est_cell_h * 1.55 and rows < 2:
-            rows = 2
-
-        # cream can stack 3 layers
-        if block_type == "cream" and h > est_cell_h * 2.45:
-            rows = min(3, max_rows)
-
-        # green / blue max 2 layers
-        if block_type in ["green", "blue"] and rows > 2:
-            rows = 2
-
-        cv2.rectangle(
-            debug_grid,
-            (x, y),
-            (x + w, y + h),
-            color_by_type(block_type),
-            3
-        )
-
-        cv2.putText(
-            debug_grid,
-            f"{block_type} {cols}x{rows}",
-            (x + 5, max(25, y - 5)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            color_by_type(block_type),
-            2,
-            cv2.LINE_AA
-        )
-
-        for r in range(rows):
-            for c in range(cols):
-
-                x1 = x + int(c * w / cols)
-                x2 = x + int((c + 1) * w / cols)
-                y1 = y + int(r * h / rows)
-                y2 = y + int((r + 1) * h / rows)
-
-                cw = x2 - x1
-                ch = y2 - y1
-
-                if cw < rw * 0.045:
-                    continue
-
-                if ch < rh * 0.060:
-                    continue
-
-                if y2 > bottom_cut:
-                    continue
-
-                area = float(max(1, cw * ch))
-
-                g = cv2.countNonZero(green_mask[y1:y2, x1:x2]) / area
-                b = cv2.countNonZero(blue_mask[y1:y2, x1:x2]) / area
-                cr = cv2.countNonZero(cream_mask[y1:y2, x1:x2]) / area
-                wd = cv2.countNonZero(wood_mask[y1:y2, x1:x2]) / area
-                fr = cv2.countNonZero(frame_mask[y1:y2, x1:x2]) / area
-
-                frame_score = max(g, b, cr, wd, fr)
-
-                lower_y1 = y1 + int(ch * 0.45)
-                lower_area = float(max(1, (y2 - lower_y1) * cw))
-
-                lg = cv2.countNonZero(green_mask[lower_y1:y2, x1:x2]) / lower_area
-                lb = cv2.countNonZero(blue_mask[lower_y1:y2, x1:x2]) / lower_area
-                lc = cv2.countNonZero(cream_mask[lower_y1:y2, x1:x2]) / lower_area
-                lw = cv2.countNonZero(wood_mask[lower_y1:y2, x1:x2]) / lower_area
-                lf = cv2.countNonZero(frame_mask[lower_y1:y2, x1:x2]) / lower_area
-
-                lower_score = max(lg, lb, lc, lw, lf)
-
-                if frame_score < 0.006:
-                    continue
-
-                if lower_score < 0.004:
-                    continue
-
-                if y1 < rh * 0.35 and frame_score < 0.018:
-                    continue
-
-                t = classify_color_cell(
-                    x1,
-                    y1,
-                    x2,
-                    y2
-                )
-
-                if t == "unknown" and fr >= 0.006:
-                    t = block_type
-
-                cells.append((x1, y1, cw, ch))
-                cell_types.append(t)
-
-                cv2.rectangle(
-                    debug_grid,
-                    (x1, y1),
-                    (x2, y2),
-                    color_by_type(t),
-                    1
-                )
-
-    # =========================
-    # FILTER CELLS
-    # =========================
-    filtered_cells = []
-    filtered_types = []
-
-    for i, (x, y, w, h) in enumerate(cells):
-
-        t = cell_types[i]
-        aspect = w / float(max(1, h))
-
-        if w < rw * 0.050:
-            continue
-
-        if h < rh * 0.065:
-            continue
-
-        if w > rw * 0.34:
-            continue
-
-        if h > rh * 0.45:
-            continue
-
-        if aspect < 0.35:
-            continue
-
-        if aspect > 3.80:
-            continue
-
-        filtered_cells.append((x, y, w, h))
-        filtered_types.append(t)
-
-    cells = filtered_cells
-    cell_types = filtered_types
-
-    # =========================
-    # SPLIT OVERSIZE CELLS
-    # =========================
-    def split_oversize_cells(cells, cell_types):
-        new_cells = []
-        new_types = []
-
-        size_profile = {
+    def split_big_boxes(boxes, types):
+        out_boxes = []
+        out_types = []
+
+        profile = {
             "green": {
                 "target_w": rw * 0.18,
                 "target_h": rh * 0.28,
@@ -826,45 +672,34 @@ def gen_pallet(img, debug=True):
                 "target_h": rh * 0.27,
                 "max_cols": 4,
                 "max_rows": 2
-            },
-            "unknown": {
-                "target_w": rw * 0.14,
-                "target_h": rh * 0.26,
-                "max_cols": 4,
-                "max_rows": 2
             }
         }
 
-        for i, (x, y, w, h) in enumerate(cells):
-            original_type = cell_types[i]
+        for i, (x, y, w, h) in enumerate(boxes):
+            t = types[i]
 
-            profile = size_profile.get(
-                original_type,
-                size_profile["unknown"]
-            )
+            p = profile.get(t, profile["cream"])
 
-            target_w = profile["target_w"]
-            target_h = profile["target_h"]
-            max_cols = profile["max_cols"]
-            max_rows = profile["max_rows"]
+            tw = p["target_w"]
+            th = p["target_h"]
+            max_cols = p["max_cols"]
+            max_rows = p["max_rows"]
 
             cols = 1
             rows = 1
 
-            if w > target_w * 1.75:
-                cols = int(round(w / target_w))
+            if w > tw * 1.75:
+                cols = int(round(w / tw))
                 cols = max(2, min(cols, max_cols))
 
-            if h > target_h * 1.55:
-                rows = int(round(h / target_h))
+            if h > th * 1.65:
+                rows = int(round(h / th))
                 rows = max(2, min(rows, max_rows))
 
-            # cream can stack 3 layers
-            if original_type == "cream" and h > target_h * 2.45:
+            if t == "cream" and h > th * 2.45:
                 rows = min(3, max_rows)
 
-            # green / blue max 2 layers
-            if original_type in ["green", "blue"] and rows > 2:
+            if t in ["green", "blue"] and rows > 2:
                 rows = 2
 
             for r in range(rows):
@@ -874,83 +709,38 @@ def gen_pallet(img, debug=True):
                     y1 = y + int(r * h / rows)
                     y2 = y + int((r + 1) * h / rows)
 
-                    cw = x2 - x1
-                    ch = y2 - y1
+                    sw = x2 - x1
+                    sh = y2 - y1
 
-                    if cw < rw * 0.045:
+                    if not valid_pallet_box(x1, y1, sw, sh):
                         continue
 
-                    if ch < rh * 0.060:
-                        continue
+                    st = classify_by_border(x1, y1, sw, sh)
 
-                    if y2 > bottom_cut:
-                        continue
+                    if st == "unknown":
+                        st = t
 
-                    area = float(max(1, cw * ch))
+                    out_boxes.append((x1, y1, sw, sh))
+                    out_types.append(st)
 
-                    g = cv2.countNonZero(green_mask[y1:y2, x1:x2]) / area
-                    b = cv2.countNonZero(blue_mask[y1:y2, x1:x2]) / area
-                    cr = cv2.countNonZero(cream_mask[y1:y2, x1:x2]) / area
-                    wd = cv2.countNonZero(wood_mask[y1:y2, x1:x2]) / area
-                    fr = cv2.countNonZero(frame_mask[y1:y2, x1:x2]) / area
+        return out_boxes, out_types
 
-                    frame_score = max(g, b, cr, wd, fr)
-
-                    lower_y1 = y1 + int(ch * 0.45)
-                    lower_area = float(max(1, (y2 - lower_y1) * cw))
-
-                    lg = cv2.countNonZero(green_mask[lower_y1:y2, x1:x2]) / lower_area
-                    lb = cv2.countNonZero(blue_mask[lower_y1:y2, x1:x2]) / lower_area
-                    lc = cv2.countNonZero(cream_mask[lower_y1:y2, x1:x2]) / lower_area
-                    lw = cv2.countNonZero(wood_mask[lower_y1:y2, x1:x2]) / lower_area
-                    lf = cv2.countNonZero(frame_mask[lower_y1:y2, x1:x2]) / lower_area
-
-                    lower_score = max(lg, lb, lc, lw, lf)
-
-                    if frame_score < 0.006:
-                        continue
-
-                    if lower_score < 0.006:
-                        continue
-
-                    if y1 < rh * 0.35 and frame_score < 0.020:
-                        continue
-
-                    cell_type = classify_color_cell(
-                        x1,
-                        y1,
-                        x2,
-                        y2
-                    )
-
-                    if cell_type == "unknown":
-                        if original_type == "blue":
-                            cell_type = "cream"
-                        else:
-                            cell_type = original_type
-
-                    new_cells.append((x1, y1, cw, ch))
-                    new_types.append(cell_type)
-
-        return new_cells, new_types
-
-    cells, cell_types = split_oversize_cells(
-        cells,
-        cell_types
+    candidates, candidate_types = split_big_boxes(
+        candidates,
+        candidate_types
     )
 
-    # =========================
-    # NMS
-    # =========================
-    cells, cell_types = nms_iou(
-        cells,
-        cell_types,
+    candidates, candidate_types = nms_iou(
+        candidates,
+        candidate_types,
         iou_th=0.22
     )
 
     # =========================
-    # FINAL DRAW + COUNT
+    # FINAL DRAW
     # =========================
+    debug_box = roi.copy()
+
     counts = {
         "green": 0,
         "blue": 0,
@@ -959,9 +749,8 @@ def gen_pallet(img, debug=True):
         "unknown": 0
     }
 
-    for i, (x, y, w, h) in enumerate(cells, 1):
-
-        t = cell_types[i - 1]
+    for i, (x, y, w, h) in enumerate(candidates, 1):
+        t = candidate_types[i - 1]
 
         if t not in counts:
             counts[t] = 0
@@ -998,7 +787,7 @@ def gen_pallet(img, debug=True):
             cv2.LINE_AA
         )
 
-    total = len(cells)
+    total = len(candidates)
 
     cv2.putText(
         debug_box,
@@ -1012,8 +801,7 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET FRAME SQUARE DETECTION + STACK BY TYPE")
-    print(f"BLOCKS : {len(blocks)}")
+    print("PALLET RECTANGLE / FRAME DETECTION")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
     print(f"BLUE   : {counts['blue']}")
@@ -1035,7 +823,6 @@ def gen_pallet(img, debug=True):
         save_dbg("debug_line_mask.jpg", line_mask)
         save_dbg("debug_frame_mask.jpg", frame_mask)
         save_dbg("debug_cargo.jpg", pallet_seed)
-        save_dbg("debug_grid.jpg", debug_grid)
         save_dbg("debug_pallet_box.jpg", debug_box)
 
     return total
