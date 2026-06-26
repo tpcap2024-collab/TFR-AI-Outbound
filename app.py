@@ -109,24 +109,23 @@ def gen_pallet(img, debug=True):
         ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
 
         if close_it > 0:
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_CLOSE,
-                ker,
-                iterations=close_it
-            )
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, ker, iterations=close_it)
 
         if open_it > 0:
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_OPEN,
-                ker,
-                iterations=open_it
-            )
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker, iterations=open_it)
 
         return mask
 
-    def nms_center(boxes, types, dist=0.35):
+    def color_by_type(t):
+        if t == "green":
+            return (0, 255, 0)
+        if t == "cream":
+            return (0, 255, 255)
+        if t == "wood":
+            return (0, 180, 255)
+        return (255, 255, 255)
+
+    def nms_center(boxes, types, dist=0.25):
         out_boxes = []
         out_types = []
 
@@ -154,15 +153,6 @@ def gen_pallet(img, debug=True):
                 out_types.append(types[i])
 
         return out_boxes, out_types
-
-    def color_by_type(t):
-        if t == "green":
-            return (0, 255, 0)
-        if t == "cream":
-            return (0, 255, 255)
-        if t == "wood":
-            return (0, 180, 255)
-        return (255, 255, 255)
 
     # =========================
     # RESIZE + ROI
@@ -197,7 +187,7 @@ def gen_pallet(img, debug=True):
     gray = cv2.cvtColor(norm, cv2.COLOR_BGR2GRAY)
 
     # =========================
-    # MASKS
+    # COLOR MASKS
     # =========================
 
     # green rack
@@ -210,28 +200,28 @@ def gen_pallet(img, debug=True):
     # cream / beige cage
     cream_mask = cv2.inRange(
         hsv,
-        (5, 8, 80),
+        (5, 12, 90),
         (45, 150, 255)
     )
 
-    # gray / white cage
+    # gray / white cage แบบเข้มขึ้น กันจับผนัง/เพดาน
     white_mask = cv2.inRange(
         hsv,
-        (0, 0, 115),
-        (180, 80, 255)
+        (0, 0, 135),
+        (180, 55, 255)
     )
 
-    # brown carton / wood
+    # carton / wood
     wood_mask = cv2.inRange(
         hsv,
-        (5, 30, 45),
+        (5, 35, 55),
         (38, 220, 245)
     )
 
     # =========================
-    # CUT ROOF / WHEEL / CHASSIS
+    # CUT ROOF / FLOOR / WHEEL
     # =========================
-    top_cut = int(rh * 0.08)
+    top_cut = int(rh * 0.18)
     bottom_cut = int(rh * 0.80)
 
     for m in [green_mask, cream_mask, white_mask, wood_mask]:
@@ -253,6 +243,7 @@ def gen_pallet(img, debug=True):
     material_mask = cv2.bitwise_or(green_mask, cage_mask)
     material_mask = cv2.bitwise_or(material_mask, wood_mask)
 
+    # edge ใช้ช่วย block แต่ไม่ใช้เป็นตัวนับหลัก
     edges = cv2.Canny(
         cv2.GaussianBlur(gray, (5, 5), 0),
         50,
@@ -262,13 +253,14 @@ def gen_pallet(img, debug=True):
     edges[:top_cut, :] = 0
     edges[bottom_cut:, :] = 0
 
-    # edge ใช้ช่วยเติมโครง แต่ไม่ใช้เป็นตัวนับหลัก
-    cargo_mask = cv2.bitwise_or(material_mask, cv2.bitwise_and(edges, material_mask))
+    edge_on_material = cv2.bitwise_and(edges, material_mask)
+
+    cargo_mask = cv2.bitwise_or(material_mask, edge_on_material)
 
     cargo_mask = cv2.morphologyEx(
         cargo_mask,
         cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (17, 9)),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (13, 9)),
         iterations=2
     )
 
@@ -280,7 +272,7 @@ def gen_pallet(img, debug=True):
     )
 
     # =========================
-    # FIND MAIN BLOCKS
+    # FIND BLOCKS
     # =========================
     contours, _ = cv2.findContours(
         cargo_mask,
@@ -295,67 +287,69 @@ def gen_pallet(img, debug=True):
 
         area = w * h
 
-        if area < rw * rh * 0.008:
+        if area < rw * rh * 0.006:
             continue
 
-        if w < rw * 0.06:
+        if w < rw * 0.05:
             continue
 
-        if h < rh * 0.12:
+        if h < rh * 0.08:
             continue
 
         if y + h > bottom_cut:
+            continue
+
+        # ห้าม block ใหญ่ครอบเพดาน/ผนัง
+        if h > rh * 0.70:
             continue
 
         blocks.append((x, y, w, h))
 
     blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
 
-    # =========================
-    # CELL SPLIT / JIGSAW
-    # =========================
     cells = []
     cell_types = []
 
     debug_box = roi.copy()
     debug_grid = roi.copy()
 
-    for bi, (x, y, w, h) in enumerate(blocks, 1):
+    # =========================
+    # SPLIT EACH BLOCK
+    # =========================
+    for (x, y, w, h) in blocks:
 
         block_area = float(max(1, w * h))
 
-        g_ratio = cv2.countNonZero(
+        green_ratio = cv2.countNonZero(
             green_mask[y:y + h, x:x + w]
         ) / block_area
 
-        c_ratio = cv2.countNonZero(
+        cage_ratio = cv2.countNonZero(
             cage_mask[y:y + h, x:x + w]
         ) / block_area
 
-        w_ratio = cv2.countNonZero(
+        wood_ratio = cv2.countNonZero(
             wood_mask[y:y + h, x:x + w]
         ) / block_area
 
-        # classify block
-        if g_ratio >= 0.030:
+        if green_ratio >= max(cage_ratio, wood_ratio):
             block_type = "green"
-        elif c_ratio >= 0.030:
+        elif cage_ratio >= max(green_ratio, wood_ratio):
             block_type = "cream"
-        elif w_ratio >= 0.030:
+        else:
             block_type = "wood"
-        else:
-            block_type = "unknown"
 
-        # estimate grid
-        # ค่าพวกนี้ตั้งให้เหมาะกับ rack/cage บนรถ side view
+        # =========================
+        # ESTIMATE GRID SIZE
+        # =========================
         if block_type == "green":
-            est_cell_w = rw * 0.15
-            est_cell_h = rh * 0.32
+            est_cell_w = rw * 0.14
+            est_cell_h = rh * 0.28
         elif block_type == "cream":
-            est_cell_w = rw * 0.16
-            est_cell_h = rh * 0.30
+            est_cell_w = rw * 0.13
+            est_cell_h = rh * 0.26
         else:
-            est_cell_w = rw * 0.15
+            est_cell_w = rw * 0.14
             est_cell_h = rh * 0.28
 
         cols = int(round(w / max(1.0, est_cell_w)))
@@ -364,13 +358,11 @@ def gen_pallet(img, debug=True):
         cols = max(1, min(6, cols))
         rows = max(1, min(3, rows))
 
-        # ถ้าบล็อกสูงมากแต่ rows ยัง 1 ให้บังคับ 2 ชั้น
-        if h > rh * 0.45 and rows < 2:
-            rows = 2
-
-        # ถ้าบล็อกกว้างมากแต่ cols ยัง 1 ให้บังคับแยก
-        if w > rw * 0.25 and cols < 2:
+        if w > rw * 0.28 and cols < 2:
             cols = 2
+
+        if h > rh * 0.38 and rows < 2:
+            rows = 2
 
         cv2.rectangle(
             debug_grid,
@@ -391,6 +383,9 @@ def gen_pallet(img, debug=True):
             cv2.LINE_AA
         )
 
+        # =========================
+        # CREATE CELLS
+        # =========================
         for r in range(rows):
             for c in range(cols):
                 x1 = x + int(c * w / cols)
@@ -401,10 +396,10 @@ def gen_pallet(img, debug=True):
                 cw = x2 - x1
                 ch = y2 - y1
 
-                if cw < rw * 0.055:
+                if cw < rw * 0.050:
                     continue
 
-                if ch < rh * 0.080:
+                if ch < rh * 0.070:
                     continue
 
                 if y2 > bottom_cut:
@@ -424,17 +419,12 @@ def gen_pallet(img, debug=True):
                     wood_mask[y1:y2, x1:x2]
                 ) / cell_area
 
-                cell_edge = cv2.countNonZero(
-                    edges[y1:y2, x1:x2]
-                ) / cell_area
-
-                # ต้องมีวัสดุจริง ไม่ใช่เส้น edge อย่างเดียว
+                # สำคัญ: ใช้ material เท่านั้น ห้ามใช้ edge ล้วน
                 material_score = max(cell_green, cell_cage, cell_wood)
 
-                if material_score < 0.018 and cell_edge < 0.020:
+                if material_score < 0.012:
                     continue
 
-                # classify cell
                 if cell_green >= max(cell_cage, cell_wood):
                     t = "green"
                 elif cell_cage >= max(cell_green, cell_wood):
@@ -454,9 +444,9 @@ def gen_pallet(img, debug=True):
                 )
 
     # =========================
-    # REMOVE DUPLICATE
+    # REMOVE DUP
     # =========================
-    cells, cell_types = nms_center(cells, cell_types, dist=0.30)
+    cells, cell_types = nms_center(cells, cell_types, dist=0.25)
 
     # =========================
     # FINAL DRAW
@@ -475,8 +465,6 @@ def gen_pallet(img, debug=True):
             counts[t] = 0
 
         counts[t] += 1
-
-        color = color_by_type(t)
 
         if t == "green":
             prefix = "G"
@@ -520,7 +508,7 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET JIGSAW MULTI-COLOR")
+    print("PALLET MULTI-COLOR BLOCK GRID")
     print(f"BLOCKS : {len(blocks)}")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
@@ -529,7 +517,7 @@ def gen_pallet(img, debug=True):
     print("=" * 50)
 
     # =========================
-    # DEBUG SAVE
+    # SAVE DEBUG
     # =========================
     if debug:
         save_dbg("debug_original.jpg", roi)
