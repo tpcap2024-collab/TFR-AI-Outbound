@@ -95,349 +95,454 @@ def gen_volume(img, debug=True, return_empty=False):
 
 def gen_pallet(img, debug=True):
 
+    if img is None or img.size == 0:
+        return 0
+
+    # =========================
+    # HELPERS
+    # =========================
+    def save_dbg(name, im):
+        if debug and im is not None:
+            save_debug(name, im)
+
+    def clean(mask, k=5, close_it=1, open_it=1):
+        ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
+
+        if close_it > 0:
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_CLOSE,
+                ker,
+                iterations=close_it
+            )
+
+        if open_it > 0:
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_OPEN,
+                ker,
+                iterations=open_it
+            )
+
+        return mask
+
+    def nms_center(boxes, types, dist=0.35):
+        out_boxes = []
+        out_types = []
+
+        for i, b in enumerate(boxes):
+            x, y, w, h = b
+            cx = x + w / 2
+            cy = y + h / 2
+
+            dup = False
+
+            for ob in out_boxes:
+                ox, oy, ow, oh = ob
+                ocx = ox + ow / 2
+                ocy = oy + oh / 2
+
+                if (
+                    abs(cx - ocx) < min(w, ow) * dist and
+                    abs(cy - ocy) < min(h, oh) * dist
+                ):
+                    dup = True
+                    break
+
+            if not dup:
+                out_boxes.append(b)
+                out_types.append(types[i])
+
+        return out_boxes, out_types
+
+    def color_by_type(t):
+        if t == "green":
+            return (0, 255, 0)
+        if t == "cream":
+            return (0, 255, 255)
+        if t == "wood":
+            return (0, 180, 255)
+        return (255, 255, 255)
+
+    # =========================
+    # RESIZE + ROI
+    # =========================
     img = cv2.resize(img, (1280, 720))
     H, W = img.shape[:2]
 
-    # ROI เฉพาะตัวรถ
     roi = img[
-        int(H * 0.15):int(H * 0.85),
+        int(H * 0.13):int(H * 0.85),
         int(W * 0.02):int(W * 0.98)
     ]
 
     rh, rw = roi.shape[:2]
 
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    # =========================
+    # NORMALIZE
+    # =========================
+    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+
+    l = cv2.createCLAHE(
+        clipLimit=2.0,
+        tileGridSize=(8, 8)
+    ).apply(l)
+
+    norm = cv2.cvtColor(
+        cv2.merge((l, a, b)),
+        cv2.COLOR_LAB2BGR
+    )
+
+    hsv = cv2.cvtColor(norm, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(norm, cv2.COLOR_BGR2GRAY)
 
     # =========================
-    # GREEN MASK
+    # MASKS
     # =========================
+
+    # green rack
     green_mask = cv2.inRange(
         hsv,
         (30, 30, 30),
-        (90, 255, 255)
+        (95, 255, 255)
     )
 
-    # ตัดส่วนหลังคา/ล้อ/คานล่าง
-    top_cut = int(rh * 0.06)
-    bottom_cut = int(rh * 0.78)
+    # cream / beige cage
+    cream_mask = cv2.inRange(
+        hsv,
+        (5, 8, 80),
+        (45, 150, 255)
+    )
 
-    green_mask[:top_cut, :] = 0
-    green_mask[bottom_cut:, :] = 0
+    # gray / white cage
+    white_mask = cv2.inRange(
+        hsv,
+        (0, 0, 115),
+        (180, 80, 255)
+    )
+
+    # brown carton / wood
+    wood_mask = cv2.inRange(
+        hsv,
+        (5, 30, 45),
+        (38, 220, 245)
+    )
 
     # =========================
-    # CLEAN
+    # CUT ROOF / WHEEL / CHASSIS
     # =========================
-    k3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    k5 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    top_cut = int(rh * 0.08)
+    bottom_cut = int(rh * 0.80)
 
-    green_mask = cv2.morphologyEx(
-        green_mask,
-        cv2.MORPH_OPEN,
-        k3,
-        iterations=1
-    )
+    for m in [green_mask, cream_mask, white_mask, wood_mask]:
+        m[:top_cut, :] = 0
+        m[bottom_cut:, :] = 0
+        m[:, :int(rw * 0.01)] = 0
+        m[:, int(rw * 0.99):] = 0
 
-    green_mask = cv2.morphologyEx(
-        green_mask,
-        cv2.MORPH_CLOSE,
-        k5,
-        iterations=1
-    )
+    # =========================
+    # CLEAN MASKS
+    # =========================
+    green_mask = clean(green_mask, 5, 1, 1)
+    cream_mask = clean(cream_mask, 5, 1, 1)
+    white_mask = clean(white_mask, 5, 1, 1)
+    wood_mask = clean(wood_mask, 5, 1, 1)
 
-    # edge ใช้ช่วยหาแนวแบ่ง ไม่ใช้เป็นตัวนับหลัก
+    cage_mask = cv2.bitwise_or(cream_mask, white_mask)
+
+    material_mask = cv2.bitwise_or(green_mask, cage_mask)
+    material_mask = cv2.bitwise_or(material_mask, wood_mask)
+
     edges = cv2.Canny(
         cv2.GaussianBlur(gray, (5, 5), 0),
         50,
         150
     )
+
     edges[:top_cut, :] = 0
     edges[bottom_cut:, :] = 0
 
-    split_map = cv2.bitwise_or(green_mask, edges)
+    # edge ใช้ช่วยเติมโครง แต่ไม่ใช้เป็นตัวนับหลัก
+    cargo_mask = cv2.bitwise_or(material_mask, cv2.bitwise_and(edges, material_mask))
 
-    debug_img = roi.copy()
+    cargo_mask = cv2.morphologyEx(
+        cargo_mask,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (17, 9)),
+        iterations=2
+    )
+
+    cargo_mask = cv2.morphologyEx(
+        cargo_mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
+        iterations=1
+    )
+
+    # =========================
+    # FIND MAIN BLOCKS
+    # =========================
+    contours, _ = cv2.findContours(
+        cargo_mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    blocks = []
+
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+
+        area = w * h
+
+        if area < rw * rh * 0.008:
+            continue
+
+        if w < rw * 0.06:
+            continue
+
+        if h < rh * 0.12:
+            continue
+
+        if y + h > bottom_cut:
+            continue
+
+        blocks.append((x, y, w, h))
+
+    blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
+
+    # =========================
+    # CELL SPLIT / JIGSAW
+    # =========================
+    cells = []
+    cell_types = []
+
+    debug_box = roi.copy()
     debug_grid = roi.copy()
 
-    # =========================
-    # หา bounding area ของ cargo จริงก่อน
-    # =========================
-    ys, xs = np.where(green_mask > 0)
+    for bi, (x, y, w, h) in enumerate(blocks, 1):
 
-    if xs.size == 0 or ys.size == 0:
-        if debug:
-            save_debug("debug_green_mask.jpg", green_mask)
-            save_debug("debug_edges.jpg", edges)
-            save_debug("debug_pallet_box.jpg", debug_img)
-        return 0
+        block_area = float(max(1, w * h))
 
-    x_min = int(xs.min())
-    x_max = int(xs.max())
-    y_min = int(ys.min())
-    y_max = int(ys.max())
+        g_ratio = cv2.countNonZero(
+            green_mask[y:y + h, x:x + w]
+        ) / block_area
 
-    # padding นิดหน่อย
-    pad_x = int((x_max - x_min) * 0.02)
-    pad_y = int((y_max - y_min) * 0.03)
+        c_ratio = cv2.countNonZero(
+            cage_mask[y:y + h, x:x + w]
+        ) / block_area
 
-    x_min = max(0, x_min - pad_x)
-    x_max = min(rw - 1, x_max + pad_x)
-    y_min = max(0, y_min - pad_y)
-    y_max = min(rh - 1, y_max + pad_y)
+        w_ratio = cv2.countNonZero(
+            wood_mask[y:y + h, x:x + w]
+        ) / block_area
 
-    work_mask = split_map[y_min:y_max, x_min:x_max]
-    work_green = green_mask[y_min:y_max, x_min:x_max]
-
-    wh, ww = work_mask.shape[:2]
-
-    # =========================
-    # HELPER: หา segment จาก projection
-    # =========================
-    def find_segments(proj, th_ratio=0.25, min_len=20):
-        segs = []
-        if proj.size == 0 or np.max(proj) <= 0:
-            return segs
-
-        th = float(np.max(proj)) * th_ratio
-        inside = False
-        start = 0
-
-        for i, v in enumerate(proj):
-            if v > th and not inside:
-                start = i
-                inside = True
-            elif v <= th and inside:
-                end = i
-                if (end - start) >= min_len:
-                    segs.append((start, end))
-                inside = False
-
-        if inside:
-            end = len(proj) - 1
-            if (end - start) >= min_len:
-                segs.append((start, end))
-
-        return segs
-
-    # =========================
-    # 1) หา column หลัก
-    # =========================
-    col_proj = np.sum(work_mask > 0, axis=0).astype(np.float32)
-
-    # smooth
-    col_proj = cv2.GaussianBlur(col_proj.reshape(1, -1), (31, 1), 0).ravel()
-
-    col_segments = find_segments(
-        col_proj,
-        th_ratio=0.22,
-        min_len=max(20, int(ww * 0.06))
-    )
-
-    # fallback ถ้า segmentation ได้น้อยเกิน
-    if len(col_segments) == 0:
-        col_segments = [(0, ww - 1)]
-
-    # ถ้ากว้างมาก → split เพิ่มแบบจิ๊กซอว์
-    final_cols = []
-
-    for (s, e) in col_segments:
-        width = e - s
-
-        # ประเมินความกว้าง pallet 1 ช่องแบบหยาบ
-        est_col_w = max(60, int(ww * 0.16))
-
-        if width > est_col_w * 1.8:
-            ncols = int(round(width / float(est_col_w)))
-            ncols = max(2, ncols)
-
-            for i in range(ncols):
-                cs = s + int(i * width / ncols)
-                ce = s + int((i + 1) * width / ncols)
-                final_cols.append((cs, ce))
+        # classify block
+        if g_ratio >= 0.030:
+            block_type = "green"
+        elif c_ratio >= 0.030:
+            block_type = "cream"
+        elif w_ratio >= 0.030:
+            block_type = "wood"
         else:
-            final_cols.append((s, e))
+            block_type = "unknown"
 
-    col_segments = final_cols
-
-    # =========================
-    # 2) หา row หลัก (ชั้น)
-    # =========================
-    row_proj = np.sum(work_mask > 0, axis=1).astype(np.float32)
-    row_proj = cv2.GaussianBlur(row_proj.reshape(-1, 1), (1, 21), 0).ravel()
-
-    row_segments = find_segments(
-        row_proj,
-        th_ratio=0.22,
-        min_len=max(18, int(wh * 0.08))
-    )
-
-    # ถ้าไม่เจอ ให้ใช้ 1 ชั้น
-    if len(row_segments) == 0:
-        row_segments = [(0, wh - 1)]
-
-    # ถ้าก้อนสูงมาก → split เป็น 2 ชั้น
-    final_rows = []
-
-    for (s, e) in row_segments:
-        height = e - s
-        est_row_h = max(70, int(wh * 0.30))
-
-        if height > est_row_h * 1.6:
-            nrows = int(round(height / float(est_row_h)))
-            nrows = max(2, nrows)
-
-            for i in range(nrows):
-                rs = s + int(i * height / nrows)
-                re = s + int((i + 1) * height / nrows)
-                final_rows.append((rs, re))
+        # estimate grid
+        # ค่าพวกนี้ตั้งให้เหมาะกับ rack/cage บนรถ side view
+        if block_type == "green":
+            est_cell_w = rw * 0.15
+            est_cell_h = rh * 0.32
+        elif block_type == "cream":
+            est_cell_w = rw * 0.16
+            est_cell_h = rh * 0.30
         else:
-            final_rows.append((s, e))
+            est_cell_w = rw * 0.15
+            est_cell_h = rh * 0.28
 
-    row_segments = final_rows
+        cols = int(round(w / max(1.0, est_cell_w)))
+        rows = int(round(h / max(1.0, est_cell_h)))
 
-    # =========================
-    # 3) สร้าง cell แบบจิ๊กซอว์
-    # =========================
-    pallet_count = 0
-    cell_boxes = []
+        cols = max(1, min(6, cols))
+        rows = max(1, min(3, rows))
 
-    for (rs, re) in row_segments:
-        for (cs, ce) in col_segments:
-            x1 = x_min + cs
-            x2 = x_min + ce
-            y1 = y_min + rs
-            y2 = y_min + re
+        # ถ้าบล็อกสูงมากแต่ rows ยัง 1 ให้บังคับ 2 ชั้น
+        if h > rh * 0.45 and rows < 2:
+            rows = 2
 
-            w = x2 - x1
-            h = y2 - y1
+        # ถ้าบล็อกกว้างมากแต่ cols ยัง 1 ให้บังคับแยก
+        if w > rw * 0.25 and cols < 2:
+            cols = 2
 
-            # filter ขนาด
-            if w < rw * 0.06:
-                continue
-            if h < rh * 0.10:
-                continue
-            if y2 > bottom_cut:
-                continue
-
-            cell_green = green_mask[y1:y2, x1:x2]
-            density = np.sum(cell_green > 0) / (cell_green.size + 1e-6)
-
-            # ต้องมีเขียวพอสมควรถึงนับ
-            if density < 0.03:
-                continue
-
-            pallet_count += 1
-            cell_boxes.append((x1, y1, x2, y2))
-
-    # =========================
-    # 4) fallback กันนับขาด
-    # ถ้าได้น้อยเกิน 2 ให้ลองใช้ contour บน green_mask โดยตรง
-    # =========================
-    if pallet_count < 2:
-        contour_mask = green_mask.copy()
-
-        contours, _ = cv2.findContours(
-            contour_mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        fallback_boxes = []
-
-        for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-
-            if w < rw * 0.08:
-                continue
-            if h < rh * 0.10:
-                continue
-            if y + h > bottom_cut:
-                continue
-
-            fallback_boxes.append((x, y, x + w, y + h))
-
-        if len(fallback_boxes) > pallet_count:
-            cell_boxes = fallback_boxes
-            pallet_count = len(fallback_boxes)
-
-    # =========================
-    # DRAW RESULT
-    # =========================
-    # วาดกรอบรวมของงาน
-    cv2.rectangle(
-        debug_grid,
-        (x_min, y_min),
-        (x_max, y_max),
-        (255, 0, 255),
-        2
-    )
-
-    # วาดแนว column
-    for (cs, ce) in col_segments:
-        x1 = x_min + cs
-        x2 = x_min + ce
         cv2.rectangle(
             debug_grid,
-            (x1, y_min),
-            (x2, y_max),
-            (255, 255, 0),
-            1
+            (x, y),
+            (x + w, y + h),
+            color_by_type(block_type),
+            3
         )
 
-    # วาดแนว row
-    for (rs, re) in row_segments:
-        y1 = y_min + rs
-        y2 = y_min + re
-        cv2.rectangle(
+        cv2.putText(
             debug_grid,
-            (x_min, y1),
-            (x_max, y2),
-            (0, 255, 255),
-            1
+            f"{block_type} {cols}x{rows}",
+            (x + 5, max(25, y - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            color_by_type(block_type),
+            2,
+            cv2.LINE_AA
         )
 
-    for i, (x1, y1, x2, y2) in enumerate(cell_boxes, 1):
+        for r in range(rows):
+            for c in range(cols):
+                x1 = x + int(c * w / cols)
+                x2 = x + int((c + 1) * w / cols)
+                y1 = y + int(r * h / rows)
+                y2 = y + int((r + 1) * h / rows)
+
+                cw = x2 - x1
+                ch = y2 - y1
+
+                if cw < rw * 0.055:
+                    continue
+
+                if ch < rh * 0.080:
+                    continue
+
+                if y2 > bottom_cut:
+                    continue
+
+                cell_area = float(max(1, cw * ch))
+
+                cell_green = cv2.countNonZero(
+                    green_mask[y1:y2, x1:x2]
+                ) / cell_area
+
+                cell_cage = cv2.countNonZero(
+                    cage_mask[y1:y2, x1:x2]
+                ) / cell_area
+
+                cell_wood = cv2.countNonZero(
+                    wood_mask[y1:y2, x1:x2]
+                ) / cell_area
+
+                cell_edge = cv2.countNonZero(
+                    edges[y1:y2, x1:x2]
+                ) / cell_area
+
+                # ต้องมีวัสดุจริง ไม่ใช่เส้น edge อย่างเดียว
+                material_score = max(cell_green, cell_cage, cell_wood)
+
+                if material_score < 0.018 and cell_edge < 0.020:
+                    continue
+
+                # classify cell
+                if cell_green >= max(cell_cage, cell_wood):
+                    t = "green"
+                elif cell_cage >= max(cell_green, cell_wood):
+                    t = "cream"
+                else:
+                    t = "wood"
+
+                cells.append((x1, y1, cw, ch))
+                cell_types.append(t)
+
+                cv2.rectangle(
+                    debug_grid,
+                    (x1, y1),
+                    (x2, y2),
+                    color_by_type(t),
+                    1
+                )
+
+    # =========================
+    # REMOVE DUPLICATE
+    # =========================
+    cells, cell_types = nms_center(cells, cell_types, dist=0.30)
+
+    # =========================
+    # FINAL DRAW
+    # =========================
+    counts = {
+        "green": 0,
+        "cream": 0,
+        "wood": 0,
+        "unknown": 0
+    }
+
+    for i, (x, y, w, h) in enumerate(cells, 1):
+        t = cell_types[i - 1]
+
+        if t not in counts:
+            counts[t] = 0
+
+        counts[t] += 1
+
+        color = color_by_type(t)
+
+        if t == "green":
+            prefix = "G"
+        elif t == "cream":
+            prefix = "C"
+        elif t == "wood":
+            prefix = "W"
+        else:
+            prefix = "U"
+
         cv2.rectangle(
-            debug_img,
-            (x1, y1),
-            (x2, y2),
+            debug_box,
+            (x, y),
+            (x + w, y + h),
             (0, 0, 255),
             3
         )
 
         cv2.putText(
-            debug_img,
-            f"P{i}",
-            (x1 + 5, y1 + 28),
+            debug_box,
+            f"{prefix}{counts[t]}",
+            (x + 6, y + 28),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
+            0.75,
             (0, 0, 255),
-            2
+            2,
+            cv2.LINE_AA
         )
 
+    total = len(cells)
+
     cv2.putText(
-        debug_img,
-        f"PALLET={pallet_count}",
+        debug_box,
+        f"T={total} G={counts['green']} C={counts['cream']} W={counts['wood']}",
         (20, 40),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1,
+        1.0,
         (0, 255, 255),
-        3
+        3,
+        cv2.LINE_AA
     )
 
     print("=" * 50)
-    print("JIGSAW PALLET =", pallet_count)
-    print("COL SEGMENTS =", len(col_segments))
-    print("ROW SEGMENTS =", len(row_segments))
+    print("PALLET JIGSAW MULTI-COLOR")
+    print(f"BLOCKS : {len(blocks)}")
+    print(f"TOTAL  : {total}")
+    print(f"GREEN  : {counts['green']}")
+    print(f"CREAM  : {counts['cream']}")
+    print(f"WOOD   : {counts['wood']}")
     print("=" * 50)
 
+    # =========================
+    # DEBUG SAVE
+    # =========================
     if debug:
-        save_debug("debug_green_mask.jpg", green_mask)
-        save_debug("debug_edges.jpg", edges)
-        save_debug("debug_grid.jpg", debug_grid)
-        save_debug("debug_pallet_box.jpg", debug_img)
+        save_dbg("debug_original.jpg", roi)
+        save_dbg("debug_normalized.jpg", norm)
+        save_dbg("debug_green_mask.jpg", green_mask)
+        save_dbg("debug_cream_mask.jpg", cage_mask)
+        save_dbg("debug_wood_mask.jpg", wood_mask)
+        save_dbg("debug_edges.jpg", edges)
+        save_dbg("debug_cargo.jpg", cargo_mask)
+        save_dbg("debug_grid.jpg", debug_grid)
+        save_dbg("debug_pallet_box.jpg", debug_box)
 
-    return pallet_count
+    return total
 
 
 # =========================
