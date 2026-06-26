@@ -246,7 +246,8 @@ def gen_pallet(img, debug=True):
 
         for i, b in enumerate(boxes):
             x, y, w, h = b
-            items.append((b, types[i], w * h))
+            area = w * h
+            items.append((b, types[i], area))
 
         items = sorted(items, key=lambda v: v[2], reverse=True)
 
@@ -417,9 +418,11 @@ def gen_pallet(img, debug=True):
         iterations=1
     )
 
-    line_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
+    line_mask = cv2.bitwise_or(
+        vertical_lines,
+        horizontal_lines
+    )
 
-    # ให้เส้นที่อยู่ใกล้วัสดุมีน้ำหนัก
     material_dilate = cv2.dilate(
         material_mask,
         cv2.getStructuringElement(cv2.MORPH_RECT, (31, 21)),
@@ -431,7 +434,6 @@ def gen_pallet(img, debug=True):
         material_dilate
     )
 
-    # อนุญาตเส้นกรงในโซนล่างสินค้า
     lower_zone = np.zeros_like(line_mask)
     lower_zone[int(rh * 0.32):bottom_cut, :] = 255
 
@@ -454,6 +456,7 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # PALLET SEED
+    # สำคัญ: อย่า close หนักเกิน ไม่งั้นจะกลายเป็นก้อนขาวใหญ่
     # =========================
     pallet_seed = cv2.bitwise_or(
         material_mask,
@@ -463,7 +466,7 @@ def gen_pallet(img, debug=True):
     pallet_seed = cv2.morphologyEx(
         pallet_seed,
         cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (11, 7)),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (9, 5)),
         iterations=1
     )
 
@@ -478,15 +481,16 @@ def gen_pallet(img, debug=True):
     # CLASSIFY BY BORDER
     # =========================
     def classify_by_border(x, y, w, h):
+        if w <= 0 or h <= 0:
+            return "unknown"
+
         x1 = x
         y1 = y
         x2 = x + w
         y2 = y + h
 
-        if w <= 0 or h <= 0:
-            return "unknown"
-
         border = max(6, int(min(w, h) * 0.12))
+
         border_mask = np.zeros((h, w), dtype=np.uint8)
 
         border_mask[:border, :] = 255
@@ -494,7 +498,7 @@ def gen_pallet(img, debug=True):
         border_mask[:, :border] = 255
         border_mask[:, w - border:] = 255
 
-        area = float(max(1, cv2.countNonZero(border_mask)))
+        border_area = float(max(1, cv2.countNonZero(border_mask)))
 
         g_crop = green_mask[y1:y2, x1:x2]
         b_crop = blue_mask[y1:y2, x1:x2]
@@ -502,13 +506,13 @@ def gen_pallet(img, debug=True):
         w_crop = wood_mask[y1:y2, x1:x2]
         f_crop = frame_mask[y1:y2, x1:x2]
 
-        g = cv2.countNonZero(cv2.bitwise_and(g_crop, border_mask)) / area
-        b = cv2.countNonZero(cv2.bitwise_and(b_crop, border_mask)) / area
-        c = cv2.countNonZero(cv2.bitwise_and(c_crop, border_mask)) / area
-        wd = cv2.countNonZero(cv2.bitwise_and(w_crop, border_mask)) / area
-        fr = cv2.countNonZero(cv2.bitwise_and(f_crop, border_mask)) / area
+        g = cv2.countNonZero(cv2.bitwise_and(g_crop, border_mask)) / border_area
+        b = cv2.countNonZero(cv2.bitwise_and(b_crop, border_mask)) / border_area
+        c = cv2.countNonZero(cv2.bitwise_and(c_crop, border_mask)) / border_area
+        wd = cv2.countNonZero(cv2.bitwise_and(w_crop, border_mask)) / border_area
+        fr = cv2.countNonZero(cv2.bitwise_and(f_crop, border_mask)) / border_area
 
-        # เช็กครึ่งล่างกันผนัง / ช่องว่าง
+        # ครึ่งล่างต้องมีหลักฐาน กันผนัง / ช่องว่าง
         lower_y1 = y + int(h * 0.45)
         lower_area = float(max(1, (y + h - lower_y1) * w))
 
@@ -523,7 +527,6 @@ def gen_pallet(img, debug=True):
         if lower_score < 0.006:
             return "unknown"
 
-        # blue ต้องชัดที่ขอบ
         if (
             b > 0.035 and
             b > g * 1.3 and
@@ -531,7 +534,6 @@ def gen_pallet(img, debug=True):
         ):
             return "blue"
 
-        # green
         if (
             g > 0.025 and
             g > b * 1.2 and
@@ -539,11 +541,9 @@ def gen_pallet(img, debug=True):
         ):
             return "green"
 
-        # wood / carton
         if wd > 0.045 and wd > c * 1.2 and wd > g:
             return "wood"
 
-        # cream / frame
         if c > 0.012 or fr > 0.010:
             return "cream"
 
@@ -560,27 +560,24 @@ def gen_pallet(img, debug=True):
         if y + h > bottom_cut:
             return False
 
-        # ห้ามเล็ก
-        if w < rw * 0.075:
+        if w < rw * 0.060:
             return False
 
-        if h < rh * 0.120:
+        if h < rh * 0.095:
             return False
 
-        # ห้ามใหญ่ครอบทั้งชุด
-        if w > rw * 0.38:
+        if w > rw * 0.36:
             return False
 
-        if h > rh * 0.55:
+        if h > rh * 0.50:
             return False
 
         aspect = w / float(max(1, h))
 
-        # ห้ามแบน / ห้ามเป็นเสาแคบ
-        if aspect < 0.45:
+        if aspect < 0.40:
             return False
 
-        if aspect > 2.80:
+        if aspect > 3.20:
             return False
 
         area = float(max(1, w * h))
@@ -593,11 +590,9 @@ def gen_pallet(img, debug=True):
             frame_mask[y:y + h, x:x + w]
         ) / area
 
-        # ต้องมีสีหรือขอบจริง
-        if mat_den < 0.004 and frame_den < 0.006:
+        if mat_den < 0.003 and frame_den < 0.004:
             return False
 
-        # ครึ่งล่างต้องมีหลักฐาน
         lower_y1 = y + int(h * 0.45)
         lower_area = float(max(1, (y + h - lower_y1) * w))
 
@@ -609,13 +604,14 @@ def gen_pallet(img, debug=True):
             frame_mask[lower_y1:y + h, x:x + w]
         ) / lower_area
 
-        if max(lower_mat, lower_frame) < 0.006:
+        if max(lower_mat, lower_frame) < 0.004:
             return False
 
         return True
 
     # =========================
-    # FIND RECTANGLE / FRAME CANDIDATES
+    # FIND RAW BLOCKS
+    # แก้หลัก: block ใหญ่ต้อง split ก่อน validate
     # =========================
     contours, _ = cv2.findContours(
         pallet_seed,
@@ -623,11 +619,89 @@ def gen_pallet(img, debug=True):
         cv2.CHAIN_APPROX_SIMPLE
     )
 
-    candidates = []
-    candidate_types = []
+    raw_blocks = []
 
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
+
+        area = w * h
+
+        if area < rw * rh * 0.002:
+            continue
+
+        if w < rw * 0.04:
+            continue
+
+        if h < rh * 0.06:
+            continue
+
+        if y < top_cut:
+            continue
+
+        if y + h > bottom_cut:
+            continue
+
+        raw_blocks.append((x, y, w, h))
+
+    # =========================
+    # SPLIT LARGE RAW BLOCK
+    # =========================
+    def split_large_raw_block(x, y, w, h):
+        result = []
+
+        # ใช้ค่ากลางแบบ conservative
+        target_w = rw * 0.135
+        target_h = rh * 0.25
+
+        cols = 1
+        rows = 1
+
+        if w > target_w * 1.65:
+            cols = int(round(w / target_w))
+            cols = max(2, min(cols, 8))
+
+        if h > target_h * 1.55:
+            rows = int(round(h / target_h))
+            rows = max(2, min(rows, 3))
+
+        for r in range(rows):
+            for c in range(cols):
+                x1 = x + int(c * w / cols)
+                x2 = x + int((c + 1) * w / cols)
+                y1 = y + int(r * h / rows)
+                y2 = y + int((r + 1) * h / rows)
+
+                sw = x2 - x1
+                sh = y2 - y1
+
+                if sw < rw * 0.06:
+                    continue
+
+                if sh < rh * 0.10:
+                    continue
+
+                result.append((x1, y1, sw, sh))
+
+        return result
+
+    split_blocks = []
+
+    for x, y, w, h in raw_blocks:
+        # ถ้า block ใหญ่เกิน ห้าม validate ทันที ต้อง split ก่อน
+        if w > rw * 0.34 or h > rh * 0.45:
+            split_blocks.extend(
+                split_large_raw_block(x, y, w, h)
+            )
+        else:
+            split_blocks.append((x, y, w, h))
+
+    # =========================
+    # VALIDATE + CLASSIFY
+    # =========================
+    candidates = []
+    candidate_types = []
+
+    for x, y, w, h in split_blocks:
 
         if not valid_pallet_box(x, y, w, h):
             continue
@@ -639,96 +713,6 @@ def gen_pallet(img, debug=True):
 
         candidates.append((x, y, w, h))
         candidate_types.append(t)
-
-    # =========================
-    # SPLIT BIG CANDIDATES BY TYPE
-    # เฉพาะกรอบที่ใหญ่เกินจริง
-    # =========================
-    def split_big_boxes(boxes, types):
-        out_boxes = []
-        out_types = []
-
-        profile = {
-            "green": {
-                "target_w": rw * 0.18,
-                "target_h": rh * 0.28,
-                "max_cols": 4,
-                "max_rows": 2
-            },
-            "blue": {
-                "target_w": rw * 0.16,
-                "target_h": rh * 0.26,
-                "max_cols": 4,
-                "max_rows": 2
-            },
-            "cream": {
-                "target_w": rw * 0.125,
-                "target_h": rh * 0.24,
-                "max_cols": 6,
-                "max_rows": 3
-            },
-            "wood": {
-                "target_w": rw * 0.14,
-                "target_h": rh * 0.27,
-                "max_cols": 4,
-                "max_rows": 2
-            }
-        }
-
-        for i, (x, y, w, h) in enumerate(boxes):
-            t = types[i]
-
-            p = profile.get(t, profile["cream"])
-
-            tw = p["target_w"]
-            th = p["target_h"]
-            max_cols = p["max_cols"]
-            max_rows = p["max_rows"]
-
-            cols = 1
-            rows = 1
-
-            if w > tw * 1.75:
-                cols = int(round(w / tw))
-                cols = max(2, min(cols, max_cols))
-
-            if h > th * 1.65:
-                rows = int(round(h / th))
-                rows = max(2, min(rows, max_rows))
-
-            if t == "cream" and h > th * 2.45:
-                rows = min(3, max_rows)
-
-            if t in ["green", "blue"] and rows > 2:
-                rows = 2
-
-            for r in range(rows):
-                for c in range(cols):
-                    x1 = x + int(c * w / cols)
-                    x2 = x + int((c + 1) * w / cols)
-                    y1 = y + int(r * h / rows)
-                    y2 = y + int((r + 1) * h / rows)
-
-                    sw = x2 - x1
-                    sh = y2 - y1
-
-                    if not valid_pallet_box(x1, y1, sw, sh):
-                        continue
-
-                    st = classify_by_border(x1, y1, sw, sh)
-
-                    if st == "unknown":
-                        st = t
-
-                    out_boxes.append((x1, y1, sw, sh))
-                    out_types.append(st)
-
-        return out_boxes, out_types
-
-    candidates, candidate_types = split_big_boxes(
-        candidates,
-        candidate_types
-    )
 
     candidates, candidate_types = nms_iou(
         candidates,
@@ -802,6 +786,8 @@ def gen_pallet(img, debug=True):
 
     print("=" * 50)
     print("PALLET RECTANGLE / FRAME DETECTION")
+    print(f"RAW    : {len(raw_blocks)}")
+    print(f"SPLIT  : {len(split_blocks)}")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
     print(f"BLUE   : {counts['blue']}")
