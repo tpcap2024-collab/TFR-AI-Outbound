@@ -321,29 +321,24 @@ def gen_pallet(img, debug=True):
     # =========================
     # COLOR MASKS
     # =========================
-
-    # เขียว
     green_mask = cv2.inRange(
         hsv,
         (30, 30, 30),
         (95, 255, 255)
     )
 
-    # น้ำเงิน
     blue_mask = cv2.inRange(
         hsv,
         (85, 35, 35),
         (135, 255, 255)
     )
 
-    # ครีม / beige
     cream_mask = cv2.inRange(
         hsv,
         (5, 20, 70),
         (45, 190, 255)
     )
 
-    # ไม้ / carton
     wood_mask = cv2.inRange(
         hsv,
         (5, 35, 45),
@@ -399,7 +394,6 @@ def gen_pallet(img, debug=True):
     edge_base[:top_cut, :] = 0
     edge_base[bottom_cut:, :] = 0
 
-    # เส้นตั้งของกรง / rack
     vertical_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (3, max(20, int(rh * 0.08)))
@@ -412,7 +406,6 @@ def gen_pallet(img, debug=True):
         iterations=1
     )
 
-    # เส้นนอนของกรง / rack
     horizontal_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
         (max(30, int(rw * 0.045)), 3)
@@ -427,7 +420,7 @@ def gen_pallet(img, debug=True):
 
     line_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
 
-    # เก็บเส้นที่อยู่ใกล้วัสดุ
+    # ให้เส้นขอบที่อยู่ใกล้วัสดุมีน้ำหนักมากกว่าเส้นผนัง
     material_dilate = cv2.dilate(
         material_mask,
         cv2.getStructuringElement(cv2.MORPH_RECT, (31, 21)),
@@ -439,7 +432,6 @@ def gen_pallet(img, debug=True):
         material_dilate
     )
 
-    # อนุญาตเส้นกรงช่วงล่าง
     lower_zone = np.zeros_like(line_mask)
     lower_zone[int(rh * 0.34):bottom_cut, :] = 255
 
@@ -541,27 +533,47 @@ def gen_pallet(img, debug=True):
         w = cv2.countNonZero(wood_mask[y1:y2, x1:x2]) / area
         f = cv2.countNonZero(frame_mask[y1:y2, x1:x2]) / area
 
-        # เขียวต้องมาก่อน เพราะ rack เขียวชัดที่สุด
-        if g > 0.025:
+        h = y2 - y1
+        lower_y1 = y1 + int(h * 0.45)
+        lower_area = float(max(1, (y2 - lower_y1) * (x2 - x1)))
+
+        lg = cv2.countNonZero(green_mask[lower_y1:y2, x1:x2]) / lower_area
+        lb = cv2.countNonZero(blue_mask[lower_y1:y2, x1:x2]) / lower_area
+        lc = cv2.countNonZero(cream_mask[lower_y1:y2, x1:x2]) / lower_area
+        lw = cv2.countNonZero(wood_mask[lower_y1:y2, x1:x2]) / lower_area
+        lf = cv2.countNonZero(frame_mask[lower_y1:y2, x1:x2]) / lower_area
+
+        lower_score = max(lg, lb, lc, lw, lf)
+
+        # ถ้าครึ่งล่างไม่มีขอบ/สีจริง ถือว่าเป็นผนังหรือเพดาน
+        if lower_score < 0.006:
+            return "unknown"
+
+        # เขียวมาก่อน เพราะ rack เขียวชัด
+        if g > 0.025 and lg > 0.010:
             return "green"
 
-        # น้ำเงินต้องชัดจริงเท่านั้น
-        # กันครีม / เงา / ผนังถูกมองเป็นน้ำเงิน
-        if b > 0.060 and b > c * 1.6 and b > g * 1.6:
+        # น้ำเงินต้องชัดจริงมาก ๆ กันเงา/ผนังเพี้ยนเป็น blue
+        if (
+            b > 0.075 and
+            lb > 0.020 and
+            b > c * 2.0 and
+            b > g * 1.8
+        ):
             return "blue"
 
         # ไม้ / carton
-        if w > 0.035 and w > c:
+        if w > 0.035 and lw > 0.012 and w > c:
             return "wood"
 
-        # ถ้ามีขอบกรง แต่สีไม่ชัด ให้ถือเป็นครีม
+        # ครีม / cage / frame
         if c > 0.012 or f > 0.006:
             return "cream"
 
         return "unknown"
 
     # =========================
-    # BUILD SQUARE-LIKE CELLS
+    # BUILD INITIAL CELLS
     # =========================
     cells = []
     cell_types = []
@@ -606,17 +618,17 @@ def gen_pallet(img, debug=True):
             block_type = "cream"
 
         if block_type == "green":
-            est_cell_w = rw * 0.135
-            est_cell_h = rh * 0.27
+            est_cell_w = rw * 0.18
+            est_cell_h = rh * 0.28
         elif block_type == "blue":
-            est_cell_w = rw * 0.125
-            est_cell_h = rh * 0.25
+            est_cell_w = rw * 0.16
+            est_cell_h = rh * 0.26
         elif block_type == "cream":
             est_cell_w = rw * 0.125
             est_cell_h = rh * 0.24
         else:
-            est_cell_w = rw * 0.140
-            est_cell_h = rh * 0.28
+            est_cell_w = rw * 0.14
+            est_cell_h = rh * 0.27
 
         cols = int(round(w / max(1.0, est_cell_w)))
         rows = int(round(h / max(1.0, est_cell_h)))
@@ -671,63 +683,31 @@ def gen_pallet(img, debug=True):
 
                 area = float(max(1, cw * ch))
 
-                g = cv2.countNonZero(
-                    green_mask[y1:y2, x1:x2]
-                ) / area
+                g = cv2.countNonZero(green_mask[y1:y2, x1:x2]) / area
+                b = cv2.countNonZero(blue_mask[y1:y2, x1:x2]) / area
+                cr = cv2.countNonZero(cream_mask[y1:y2, x1:x2]) / area
+                wd = cv2.countNonZero(wood_mask[y1:y2, x1:x2]) / area
+                fr = cv2.countNonZero(frame_mask[y1:y2, x1:x2]) / area
 
-                b = cv2.countNonZero(
-                    blue_mask[y1:y2, x1:x2]
-                ) / area
+                frame_score = max(g, b, cr, wd, fr)
 
-                cr = cv2.countNonZero(
-                    cream_mask[y1:y2, x1:x2]
-                ) / area
-
-                wd = cv2.countNonZero(
-                    wood_mask[y1:y2, x1:x2]
-                ) / area
-
-                li = cv2.countNonZero(
-                    frame_mask[y1:y2, x1:x2]
-                ) / area
-
-                material_score = max(g, b, cr, wd)
-                frame_score = max(material_score, li)
-
-                # เช็กครึ่งล่างเพื่อตัดผนัง / เพดาน
                 lower_y1 = y1 + int(ch * 0.45)
                 lower_area = float(max(1, (y2 - lower_y1) * cw))
 
-                lg = cv2.countNonZero(
-                    green_mask[lower_y1:y2, x1:x2]
-                ) / lower_area
+                lg = cv2.countNonZero(green_mask[lower_y1:y2, x1:x2]) / lower_area
+                lb = cv2.countNonZero(blue_mask[lower_y1:y2, x1:x2]) / lower_area
+                lc = cv2.countNonZero(cream_mask[lower_y1:y2, x1:x2]) / lower_area
+                lw = cv2.countNonZero(wood_mask[lower_y1:y2, x1:x2]) / lower_area
+                lf = cv2.countNonZero(frame_mask[lower_y1:y2, x1:x2]) / lower_area
 
-                lb = cv2.countNonZero(
-                    blue_mask[lower_y1:y2, x1:x2]
-                ) / lower_area
+                lower_score = max(lg, lb, lc, lw, lf)
 
-                lcr = cv2.countNonZero(
-                    cream_mask[lower_y1:y2, x1:x2]
-                ) / lower_area
-
-                lwd = cv2.countNonZero(
-                    wood_mask[lower_y1:y2, x1:x2]
-                ) / lower_area
-
-                lli = cv2.countNonZero(
-                    frame_mask[lower_y1:y2, x1:x2]
-                ) / lower_area
-
-                lower_score = max(lg, lb, lcr, lwd, lli)
-
-                # ต้องมีขอบหรือวัสดุจริง
                 if frame_score < 0.006:
                     continue
 
                 if lower_score < 0.004:
                     continue
 
-                # กันโซนสูงที่เป็นผนัง
                 if y1 < rh * 0.35 and frame_score < 0.018:
                     continue
 
@@ -738,8 +718,7 @@ def gen_pallet(img, debug=True):
                     y2
                 )
 
-                # ถ้าจำแนกไม่ได้ แต่มี frame ให้ใช้ block_type
-                if t == "unknown" and li >= 0.006:
+                if t == "unknown" and fr >= 0.006:
                     t = block_type
 
                 cells.append((x1, y1, cw, ch))
@@ -754,7 +733,7 @@ def gen_pallet(img, debug=True):
                 )
 
     # =========================
-    # FILTER SQUARE-LIKE CELLS
+    # FILTER CELLS
     # =========================
     filtered_cells = []
     filtered_types = []
@@ -764,21 +743,18 @@ def gen_pallet(img, debug=True):
         t = cell_types[i]
         aspect = w / float(max(1, h))
 
-        # กรอบพาเลทควรไม่เป็นเส้นแคบ
         if w < rw * 0.050:
             continue
 
         if h < rh * 0.065:
             continue
 
-        # กันกล่องใหญ่ครอบทั้งชุด
         if w > rw * 0.34:
             continue
 
         if h > rh * 0.45:
             continue
 
-        # ลักษณะใกล้สี่เหลี่ยม / rectangle pallet
         if aspect < 0.35:
             continue
 
@@ -793,28 +769,36 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # SPLIT OVERSIZE CELLS
-    # แตกกรอบใหญ่เป็น pallet ย่อย
+    # ขนาดแต่ละสีไม่เท่ากัน
     # =========================
     def split_oversize_cells(cells, cell_types):
         new_cells = []
         new_types = []
 
+        size_profile = {
+            "green": (rw * 0.18, rh * 0.28),
+            "blue": (rw * 0.16, rh * 0.26),
+            "cream": (rw * 0.125, rh * 0.24),
+            "wood": (rw * 0.14, rh * 0.27),
+            "unknown": (rw * 0.14, rh * 0.26)
+        }
+
         for i, (x, y, w, h) in enumerate(cells):
             original_type = cell_types[i]
 
-            target_w = rw * 0.13
-            target_h = rh * 0.25
+            target_w, target_h = size_profile.get(
+                original_type,
+                size_profile["unknown"]
+            )
 
             cols = 1
             rows = 1
 
-            # ถ้ากว้างเกิน ให้แตกแนว X
-            if w > target_w * 1.65:
+            if w > target_w * 1.75:
                 cols = int(round(w / target_w))
                 cols = max(2, min(cols, 4))
 
-            # ถ้าสูงเกิน ให้แตกแนว Y
-            if h > target_h * 1.55:
+            if h > target_h * 1.65:
                 rows = int(round(h / target_h))
                 rows = max(2, min(rows, 3))
 
@@ -841,11 +825,30 @@ def gen_pallet(img, debug=True):
 
                     g = cv2.countNonZero(green_mask[y1:y2, x1:x2]) / area
                     b = cv2.countNonZero(blue_mask[y1:y2, x1:x2]) / area
-                    c_ratio = cv2.countNonZero(cream_mask[y1:y2, x1:x2]) / area
-                    w_ratio = cv2.countNonZero(wood_mask[y1:y2, x1:x2]) / area
-                    f = cv2.countNonZero(frame_mask[y1:y2, x1:x2]) / area
+                    cr = cv2.countNonZero(cream_mask[y1:y2, x1:x2]) / area
+                    wd = cv2.countNonZero(wood_mask[y1:y2, x1:x2]) / area
+                    fr = cv2.countNonZero(frame_mask[y1:y2, x1:x2]) / area
 
-                    if max(g, b, c_ratio, w_ratio, f) < 0.006:
+                    frame_score = max(g, b, cr, wd, fr)
+
+                    lower_y1 = y1 + int(ch * 0.45)
+                    lower_area = float(max(1, (y2 - lower_y1) * cw))
+
+                    lg = cv2.countNonZero(green_mask[lower_y1:y2, x1:x2]) / lower_area
+                    lb = cv2.countNonZero(blue_mask[lower_y1:y2, x1:x2]) / lower_area
+                    lc = cv2.countNonZero(cream_mask[lower_y1:y2, x1:x2]) / lower_area
+                    lw = cv2.countNonZero(wood_mask[lower_y1:y2, x1:x2]) / lower_area
+                    lf = cv2.countNonZero(frame_mask[lower_y1:y2, x1:x2]) / lower_area
+
+                    lower_score = max(lg, lb, lc, lw, lf)
+
+                    if frame_score < 0.006:
+                        continue
+
+                    if lower_score < 0.006:
+                        continue
+
+                    if y1 < rh * 0.35 and frame_score < 0.020:
                         continue
 
                     cell_type = classify_color_cell(
@@ -856,7 +859,10 @@ def gen_pallet(img, debug=True):
                     )
 
                     if cell_type == "unknown":
-                        cell_type = original_type
+                        if original_type == "blue":
+                            cell_type = "cream"
+                        else:
+                            cell_type = original_type
 
                     new_cells.append((x1, y1, cw, ch))
                     new_types.append(cell_type)
@@ -941,7 +947,7 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET FRAME SQUARE DETECTION + OVERSIZE SPLIT")
+    print("PALLET FRAME SQUARE DETECTION + COLOR SIZE PROFILE")
     print(f"BLOCKS : {len(blocks)}")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
