@@ -109,10 +109,20 @@ def gen_pallet(img, debug=True):
         ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
 
         if close_it > 0:
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, ker, iterations=close_it)
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_CLOSE,
+                ker,
+                iterations=close_it
+            )
 
         if open_it > 0:
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker, iterations=open_it)
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_OPEN,
+                ker,
+                iterations=open_it
+            )
 
         return mask
 
@@ -187,7 +197,8 @@ def gen_pallet(img, debug=True):
     gray = cv2.cvtColor(norm, cv2.COLOR_BGR2GRAY)
 
     # =========================
-    # COLOR MASKS
+    # MATERIAL MASKS
+    # สำคัญ: ไม่ใช้ white wall เป็นตัวนับหลัก
     # =========================
 
     # green rack
@@ -200,22 +211,15 @@ def gen_pallet(img, debug=True):
     # cream / beige cage
     cream_mask = cv2.inRange(
         hsv,
-        (5, 12, 90),
-        (45, 150, 255)
+        (5, 15, 75),
+        (45, 170, 255)
     )
 
-    # gray / white cage แบบเข้มขึ้น กันจับผนัง/เพดาน
-    white_mask = cv2.inRange(
-        hsv,
-        (0, 0, 135),
-        (180, 55, 255)
-    )
-
-    # carton / wood
+    # wood / carton
     wood_mask = cv2.inRange(
         hsv,
-        (5, 35, 55),
-        (38, 220, 245)
+        (5, 35, 50),
+        (38, 230, 245)
     )
 
     # =========================
@@ -224,7 +228,7 @@ def gen_pallet(img, debug=True):
     top_cut = int(rh * 0.18)
     bottom_cut = int(rh * 0.80)
 
-    for m in [green_mask, cream_mask, white_mask, wood_mask]:
+    for m in [green_mask, cream_mask, wood_mask]:
         m[:top_cut, :] = 0
         m[bottom_cut:, :] = 0
         m[:, :int(rw * 0.01)] = 0
@@ -235,15 +239,14 @@ def gen_pallet(img, debug=True):
     # =========================
     green_mask = clean(green_mask, 5, 1, 1)
     cream_mask = clean(cream_mask, 5, 1, 1)
-    white_mask = clean(white_mask, 5, 1, 1)
     wood_mask = clean(wood_mask, 5, 1, 1)
 
-    cage_mask = cv2.bitwise_or(cream_mask, white_mask)
-
-    material_mask = cv2.bitwise_or(green_mask, cage_mask)
+    material_mask = cv2.bitwise_or(green_mask, cream_mask)
     material_mask = cv2.bitwise_or(material_mask, wood_mask)
 
-    # edge ใช้ช่วย block แต่ไม่ใช้เป็นตัวนับหลัก
+    # =========================
+    # EDGE ใช้ช่วย block เท่านั้น
+    # =========================
     edges = cv2.Canny(
         cv2.GaussianBlur(gray, (5, 5), 0),
         50,
@@ -253,14 +256,21 @@ def gen_pallet(img, debug=True):
     edges[:top_cut, :] = 0
     edges[bottom_cut:, :] = 0
 
-    edge_on_material = cv2.bitwise_and(edges, material_mask)
+    # ใช้ edge เฉพาะบริเวณที่มี material ใกล้เคียง
+    material_dilate = cv2.dilate(
+        material_mask,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9)),
+        iterations=1
+    )
+
+    edge_on_material = cv2.bitwise_and(edges, material_dilate)
 
     cargo_mask = cv2.bitwise_or(material_mask, edge_on_material)
 
     cargo_mask = cv2.morphologyEx(
         cargo_mask,
         cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (13, 9)),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (15, 9)),
         iterations=2
     )
 
@@ -272,7 +282,7 @@ def gen_pallet(img, debug=True):
     )
 
     # =========================
-    # FIND BLOCKS
+    # FIND BLOCKS จาก material จริง
     # =========================
     contours, _ = cv2.findContours(
         cargo_mask,
@@ -287,35 +297,42 @@ def gen_pallet(img, debug=True):
 
         area = w * h
 
-        if area < rw * rh * 0.006:
+        if area < rw * rh * 0.004:
             continue
 
-        if w < rw * 0.05:
+        if w < rw * 0.045:
             continue
 
-        if h < rh * 0.08:
+        if h < rh * 0.070:
             continue
 
         if y + h > bottom_cut:
             continue
 
-        # ห้าม block ใหญ่ครอบเพดาน/ผนัง
-        if h > rh * 0.70:
+        # กัน block ใหญ่ครอบผนัง/เพดาน
+        if h > rh * 0.60:
+            continue
+
+        # ต้องมี material จริง ไม่ใช่ edge อย่างเดียว
+        block_material = material_mask[y:y + h, x:x + w]
+        material_density = cv2.countNonZero(block_material) / float(max(1, w * h))
+
+        if material_density < 0.012:
             continue
 
         blocks.append((x, y, w, h))
 
     blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
 
+    # =========================
+    # SPLIT BLOCK เป็น cell
+    # =========================
     cells = []
     cell_types = []
 
     debug_box = roi.copy()
     debug_grid = roi.copy()
 
-    # =========================
-    # SPLIT EACH BLOCK
-    # =========================
     for (x, y, w, h) in blocks:
 
         block_area = float(max(1, w * h))
@@ -324,32 +341,32 @@ def gen_pallet(img, debug=True):
             green_mask[y:y + h, x:x + w]
         ) / block_area
 
-        cage_ratio = cv2.countNonZero(
-            cage_mask[y:y + h, x:x + w]
+        cream_ratio = cv2.countNonZero(
+            cream_mask[y:y + h, x:x + w]
         ) / block_area
 
         wood_ratio = cv2.countNonZero(
             wood_mask[y:y + h, x:x + w]
         ) / block_area
 
-        if green_ratio >= max(cage_ratio, wood_ratio):
+        if green_ratio >= max(cream_ratio, wood_ratio):
             block_type = "green"
-        elif cage_ratio >= max(green_ratio, wood_ratio):
+        elif cream_ratio >= max(green_ratio, wood_ratio):
             block_type = "cream"
         else:
             block_type = "wood"
 
         # =========================
-        # ESTIMATE GRID SIZE
+        # ESTIMATE GRID
         # =========================
         if block_type == "green":
-            est_cell_w = rw * 0.14
+            est_cell_w = rw * 0.135
             est_cell_h = rh * 0.28
         elif block_type == "cream":
-            est_cell_w = rw * 0.13
-            est_cell_h = rh * 0.26
+            est_cell_w = rw * 0.125
+            est_cell_h = rh * 0.25
         else:
-            est_cell_w = rw * 0.14
+            est_cell_w = rw * 0.140
             est_cell_h = rh * 0.28
 
         cols = int(round(w / max(1.0, est_cell_w)))
@@ -358,10 +375,10 @@ def gen_pallet(img, debug=True):
         cols = max(1, min(6, cols))
         rows = max(1, min(3, rows))
 
-        if w > rw * 0.28 and cols < 2:
+        if w > rw * 0.25 and cols < 2:
             cols = 2
 
-        if h > rh * 0.38 and rows < 2:
+        if h > rh * 0.35 and rows < 2:
             rows = 2
 
         cv2.rectangle(
@@ -396,10 +413,10 @@ def gen_pallet(img, debug=True):
                 cw = x2 - x1
                 ch = y2 - y1
 
-                if cw < rw * 0.050:
+                if cw < rw * 0.045:
                     continue
 
-                if ch < rh * 0.070:
+                if ch < rh * 0.060:
                     continue
 
                 if y2 > bottom_cut:
@@ -411,23 +428,23 @@ def gen_pallet(img, debug=True):
                     green_mask[y1:y2, x1:x2]
                 ) / cell_area
 
-                cell_cage = cv2.countNonZero(
-                    cage_mask[y1:y2, x1:x2]
+                cell_cream = cv2.countNonZero(
+                    cream_mask[y1:y2, x1:x2]
                 ) / cell_area
 
                 cell_wood = cv2.countNonZero(
                     wood_mask[y1:y2, x1:x2]
                 ) / cell_area
 
-                # สำคัญ: ใช้ material เท่านั้น ห้ามใช้ edge ล้วน
-                material_score = max(cell_green, cell_cage, cell_wood)
+                # ห้ามนับ cell ที่ไม่มี material จริง
+                material_score = max(cell_green, cell_cream, cell_wood)
 
                 if material_score < 0.012:
                     continue
 
-                if cell_green >= max(cell_cage, cell_wood):
+                if cell_green >= max(cell_cream, cell_wood):
                     t = "green"
-                elif cell_cage >= max(cell_green, cell_wood):
+                elif cell_cream >= max(cell_green, cell_wood):
                     t = "cream"
                 else:
                     t = "wood"
@@ -508,7 +525,7 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET MULTI-COLOR BLOCK GRID")
+    print("PALLET MULTI-COLOR MATERIAL GRID")
     print(f"BLOCKS : {len(blocks)}")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
@@ -517,13 +534,13 @@ def gen_pallet(img, debug=True):
     print("=" * 50)
 
     # =========================
-    # SAVE DEBUG
+    # DEBUG SAVE
     # =========================
     if debug:
         save_dbg("debug_original.jpg", roi)
         save_dbg("debug_normalized.jpg", norm)
         save_dbg("debug_green_mask.jpg", green_mask)
-        save_dbg("debug_cream_mask.jpg", cage_mask)
+        save_dbg("debug_cream_mask.jpg", cream_mask)
         save_dbg("debug_wood_mask.jpg", wood_mask)
         save_dbg("debug_edges.jpg", edges)
         save_dbg("debug_cargo.jpg", cargo_mask)
