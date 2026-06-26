@@ -206,7 +206,7 @@ def gen_pallet(img, debug=True):
         if t == "green":
             return (0, 255, 0)
         if t == "blue":
-            return (255, 160, 0)
+            return (255, 120, 0)
         if t == "cream":
             return (0, 255, 255)
         if t == "wood":
@@ -238,7 +238,7 @@ def gen_pallet(img, debug=True):
 
         return inter / float(union)
 
-    def nms_iou(boxes, types, iou_th=0.18):
+    def nms_iou(boxes, types, iou_th=0.20):
         if not boxes:
             return boxes, types
 
@@ -289,17 +289,17 @@ def gen_pallet(img, debug=True):
     H, W = img.shape[:2]
 
     roi = img[
-        int(H * 0.13):int(H * 0.85),
+        int(H * 0.12):int(H * 0.86),
         int(W * 0.02):int(W * 0.98)
     ]
 
     rh, rw = roi.shape[:2]
 
-    top_cut = int(rh * 0.20)
-    bottom_cut = int(rh * 0.82)
+    top_cut = int(rh * 0.16)
+    bottom_cut = int(rh * 0.84)
 
     # =========================
-    # LIGHT NORMALIZE
+    # NORMALIZE LIGHT
     # =========================
     lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
@@ -322,26 +322,26 @@ def gen_pallet(img, debug=True):
     # =========================
     green_mask = cv2.inRange(
         hsv,
-        (30, 30, 30),
-        (95, 255, 255)
+        (30, 28, 28),
+        (100, 255, 255)
     )
 
     blue_mask = cv2.inRange(
         hsv,
-        (85, 35, 35),
-        (135, 255, 255)
+        (85, 30, 30),
+        (140, 255, 255)
     )
 
     cream_mask = cv2.inRange(
         hsv,
-        (5, 20, 70),
-        (45, 190, 255)
+        (4, 18, 65),
+        (48, 200, 255)
     )
 
     wood_mask = cv2.inRange(
         hsv,
-        (5, 35, 45),
-        (38, 230, 245)
+        (5, 30, 35),
+        (38, 240, 255)
     )
 
     for m in [green_mask, blue_mask, cream_mask, wood_mask]:
@@ -360,43 +360,27 @@ def gen_pallet(img, debug=True):
     material_mask = cv2.bitwise_or(material_mask, wood_mask)
 
     # =========================
-    # EDGE / FRAME DETECTION
+    # EDGE / FRAME MASK
     # =========================
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    canny = cv2.Canny(
+    edge_base = cv2.Canny(
         blur,
-        35,
+        30,
         120
     )
-
-    sobel_x = cv2.Sobel(blur, cv2.CV_8U, 1, 0, ksize=3)
-    sobel_y = cv2.Sobel(blur, cv2.CV_8U, 0, 1, ksize=3)
-
-    _, sx = cv2.threshold(
-        sobel_x,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
-
-    _, sy = cv2.threshold(
-        sobel_y,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )
-
-    edge_base = cv2.bitwise_or(canny, sx)
-    edge_base = cv2.bitwise_or(edge_base, sy)
 
     edge_base[:top_cut, :] = 0
     edge_base[bottom_cut:, :] = 0
 
-    # เส้นตั้ง
     vertical_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT,
-        (3, max(18, int(rh * 0.08)))
+        (3, max(18, int(rh * 0.075)))
+    )
+
+    horizontal_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(28, int(rw * 0.040)), 3)
     )
 
     vertical_lines = cv2.morphologyEx(
@@ -404,12 +388,6 @@ def gen_pallet(img, debug=True):
         cv2.MORPH_OPEN,
         vertical_kernel,
         iterations=1
-    )
-
-    # เส้นนอน
-    horizontal_kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (max(28, int(rw * 0.045)), 3)
     )
 
     horizontal_lines = cv2.morphologyEx(
@@ -421,10 +399,10 @@ def gen_pallet(img, debug=True):
 
     line_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
 
-    # เก็บเส้นใกล้วัสดุ
+    # ให้เส้นที่อยู่ใกล้วัสดุเท่านั้น
     material_dilate = cv2.dilate(
         material_mask,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (31, 21)),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (35, 25)),
         iterations=1
     )
 
@@ -433,9 +411,9 @@ def gen_pallet(img, debug=True):
         material_dilate
     )
 
-    # อนุญาตเส้นกรอบในโซนสินค้าด้านล่าง
+    # อนุญาตเส้นในโซนล่างของสินค้า เพราะบางกรงสีไม่ติด
     lower_zone = np.zeros_like(line_mask)
-    lower_zone[int(rh * 0.30):bottom_cut, :] = 255
+    lower_zone[int(rh * 0.28):bottom_cut, :] = 255
 
     line_lower = cv2.bitwise_and(
         line_mask,
@@ -450,28 +428,29 @@ def gen_pallet(img, debug=True):
     frame_mask = cv2.morphologyEx(
         frame_mask,
         cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (9, 5)),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (7, 5)),
         iterations=1
     )
 
     # =========================
-    # PALLET SEED
-    # ห้าม close หนัก เพื่อไม่ให้รวมเป็นแผ่นใหญ่
+    # OBJECT SEED
+    # ไม่ตีตาราง ใช้ component จริง
     # =========================
-    pallet_seed = cv2.bitwise_or(
+    object_seed = cv2.bitwise_or(
         material_mask,
         frame_mask
     )
 
-    pallet_seed = cv2.morphologyEx(
-        pallet_seed,
+    # close เบา ๆ เท่านั้น
+    object_seed = cv2.morphologyEx(
+        object_seed,
         cv2.MORPH_CLOSE,
         cv2.getStructuringElement(cv2.MORPH_RECT, (7, 5)),
         iterations=1
     )
 
-    pallet_seed = cv2.morphologyEx(
-        pallet_seed,
+    object_seed = cv2.morphologyEx(
+        object_seed,
         cv2.MORPH_OPEN,
         cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
         iterations=1
@@ -489,7 +468,7 @@ def gen_pallet(img, debug=True):
         x2 = x + w
         y2 = y + h
 
-        border = max(6, int(min(w, h) * 0.12))
+        border = max(6, int(min(w, h) * 0.13))
 
         border_mask = np.zeros((h, w), dtype=np.uint8)
 
@@ -498,7 +477,7 @@ def gen_pallet(img, debug=True):
         border_mask[:, :border] = 255
         border_mask[:, w - border:] = 255
 
-        border_area = float(max(1, cv2.countNonZero(border_mask)))
+        area = float(max(1, cv2.countNonZero(border_mask)))
 
         g_crop = green_mask[y1:y2, x1:x2]
         b_crop = blue_mask[y1:y2, x1:x2]
@@ -506,13 +485,13 @@ def gen_pallet(img, debug=True):
         w_crop = wood_mask[y1:y2, x1:x2]
         f_crop = frame_mask[y1:y2, x1:x2]
 
-        g = cv2.countNonZero(cv2.bitwise_and(g_crop, border_mask)) / border_area
-        b = cv2.countNonZero(cv2.bitwise_and(b_crop, border_mask)) / border_area
-        c = cv2.countNonZero(cv2.bitwise_and(c_crop, border_mask)) / border_area
-        wd = cv2.countNonZero(cv2.bitwise_and(w_crop, border_mask)) / border_area
-        fr = cv2.countNonZero(cv2.bitwise_and(f_crop, border_mask)) / border_area
+        g = cv2.countNonZero(cv2.bitwise_and(g_crop, border_mask)) / area
+        b = cv2.countNonZero(cv2.bitwise_and(b_crop, border_mask)) / area
+        c = cv2.countNonZero(cv2.bitwise_and(c_crop, border_mask)) / area
+        wd = cv2.countNonZero(cv2.bitwise_and(w_crop, border_mask)) / area
+        fr = cv2.countNonZero(cv2.bitwise_and(f_crop, border_mask)) / area
 
-        # ครึ่งล่างต้องมีหลักฐาน
+        # ครึ่งล่างต้องมีหลักฐานจริง
         lower_y1 = y + int(h * 0.45)
         lower_area = float(max(1, (y + h - lower_y1) * w))
 
@@ -524,38 +503,30 @@ def gen_pallet(img, debug=True):
 
         lower_score = max(lg, lb, lc, lw, lf)
 
-        if lower_score < 0.006:
+        if lower_score < 0.004:
             return "unknown"
 
-        # น้ำเงิน: ต้องชัดที่ขอบ
-        if (
-            b > 0.035 and
-            b > g * 1.3 and
-            b > c * 1.5
-        ):
+        # blue ต้องชัดจากขอบจริง
+        if b > 0.030 and b > g * 1.25 and b > c * 1.35:
             return "blue"
 
-        # เขียว
-        if (
-            g > 0.025 and
-            g > b * 1.2 and
-            g > c * 1.2
-        ):
+        # green
+        if g > 0.022 and g > b * 1.15 and g > c * 1.15:
             return "green"
 
-        # ไม้ / กล่องไม้
-        if wd > 0.045 and wd > c * 1.2 and wd > g:
+        # wood / carton
+        if wd > 0.050 and wd > c * 1.20 and wd > g:
             return "wood"
 
-        # ครีม / กรง / frame
-        if c > 0.012 or fr > 0.010:
+        # cream / cage / frame
+        if c > 0.010 or fr > 0.008:
             return "cream"
 
         return "unknown"
 
     # =========================
     # VALID PALLET BOX
-    # ห้ามเล็ก ห้ามแบน ห้ามใหญ่เกิน
+    # ห้ามเล็ก / แบน / ใหญ่เกิน
     # =========================
     def valid_pallet_box(x, y, w, h):
         if y < top_cut:
@@ -564,27 +535,27 @@ def gen_pallet(img, debug=True):
         if y + h > bottom_cut:
             return False
 
-        # ห้ามเล็ก
-        if w < rw * 0.060:
+        # ไม่เล็ก
+        if w < rw * 0.055:
             return False
 
-        if h < rh * 0.095:
+        if h < rh * 0.080:
             return False
 
-        # ห้ามใหญ่เกิน
-        if w > rw * 0.38:
+        # ไม่ใหญ่เกิน
+        if w > rw * 0.48:
             return False
 
-        if h > rh * 0.55:
+        if h > rh * 0.62:
             return False
 
         aspect = w / float(max(1, h))
 
-        # ห้ามเป็นเสา / คาน / แถบแบน
-        if aspect < 0.40:
+        # ไม่เป็นเสา ไม่เป็นคานแบน
+        if aspect < 0.32:
             return False
 
-        if aspect > 3.20:
+        if aspect > 4.20:
             return False
 
         area = float(max(1, w * h))
@@ -597,10 +568,9 @@ def gen_pallet(img, debug=True):
             frame_mask[y:y + h, x:x + w]
         ) / area
 
-        if mat_den < 0.003 and frame_den < 0.004:
+        if mat_den < 0.0025 and frame_den < 0.0035:
             return False
 
-        # ครึ่งล่างต้องมีหลักฐาน
         lower_y1 = y + int(h * 0.45)
         lower_area = float(max(1, (y + h - lower_y1) * w))
 
@@ -612,17 +582,16 @@ def gen_pallet(img, debug=True):
             frame_mask[lower_y1:y + h, x:x + w]
         ) / lower_area
 
-        if max(lower_mat, lower_frame) < 0.004:
+        if max(lower_mat, lower_frame) < 0.003:
             return False
 
         return True
 
     # =========================
-    # FIND RAW COMPONENTS
-    # ไม่ตีตาราง ใช้ component จริงเท่านั้น
+    # FIND COMPONENTS
     # =========================
     contours, _ = cv2.findContours(
-        pallet_seed,
+        object_seed,
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
@@ -637,13 +606,13 @@ def gen_pallet(img, debug=True):
 
         area = w * h
 
-        if area < rw * rh * 0.002:
+        if area < rw * rh * 0.0015:
             continue
 
-        if w < rw * 0.035:
+        if w < rw * 0.030:
             continue
 
-        if h < rh * 0.050:
+        if h < rh * 0.045:
             continue
 
         if y < top_cut:
@@ -652,28 +621,43 @@ def gen_pallet(img, debug=True):
         if y + h > bottom_cut:
             continue
 
-        # ตรงนี้ไม่ split แล้ว
-        # ถ้า component ใหญ่เกินมาก ให้ reject ไม่ใช่ตารางแบ่ง
-        if w > rw * 0.42 or h > rh * 0.62:
-            cv2.rectangle(debug_reject, (x, y), (x + w, y + h), (128, 128, 128), 2)
+        # ห้ามตีตาราง
+        # ถ้า component ใหญ่มากเกิน ให้ reject ไม่ split
+        if w > rw * 0.55 or h > rh * 0.70:
+            cv2.rectangle(
+                debug_reject,
+                (x, y),
+                (x + w, y + h),
+                (128, 128, 128),
+                2
+            )
             continue
 
         if not valid_pallet_box(x, y, w, h):
-            cv2.rectangle(debug_reject, (x, y), (x + w, y + h), (80, 80, 80), 1)
+            cv2.rectangle(
+                debug_reject,
+                (x, y),
+                (x + w, y + h),
+                (80, 80, 80),
+                1
+            )
             continue
 
         t = classify_by_border(x, y, w, h)
 
         if t == "unknown":
-            cv2.rectangle(debug_reject, (x, y), (x + w, y + h), (200, 200, 200), 1)
+            cv2.rectangle(
+                debug_reject,
+                (x, y),
+                (x + w, y + h),
+                (200, 200, 200),
+                1
+            )
             continue
 
         raw_candidates.append((x, y, w, h))
         raw_types.append(t)
 
-    # =========================
-    # NMS
-    # =========================
     candidates, candidate_types = nms_iou(
         raw_candidates,
         raw_types,
@@ -745,7 +729,7 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET FRAME COMPONENT DETECTION - NO GRID")
+    print("PALLET COMPONENT DETECTION - NO GRID")
     print(f"RAW    : {len(raw_candidates)}")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
@@ -767,7 +751,7 @@ def gen_pallet(img, debug=True):
         save_dbg("debug_edges.jpg", edge_base)
         save_dbg("debug_line_mask.jpg", line_mask)
         save_dbg("debug_frame_mask.jpg", frame_mask)
-        save_dbg("debug_cargo.jpg", pallet_seed)
+        save_dbg("debug_cargo.jpg", object_seed)
         save_dbg("debug_reject.jpg", debug_reject)
         save_dbg("debug_pallet_box.jpg", debug_box)
 
