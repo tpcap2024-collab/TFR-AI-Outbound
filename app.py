@@ -109,10 +109,20 @@ def gen_pallet(img, debug=True):
         ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
 
         if close_it > 0:
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, ker, iterations=close_it)
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_CLOSE,
+                ker,
+                iterations=close_it
+            )
 
         if open_it > 0:
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker, iterations=open_it)
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_OPEN,
+                ker,
+                iterations=open_it
+            )
 
         return mask
 
@@ -121,7 +131,9 @@ def gen_pallet(img, debug=True):
             return (0, 255, 0)
         if t == "cream":
             return (0, 255, 255)
-        return (0, 0, 255)
+        if t == "wood":
+            return (0, 180, 255)
+        return (255, 255, 255)
 
     def box_iou(a, b):
         ax, ay, aw, ah = a
@@ -148,16 +160,14 @@ def gen_pallet(img, debug=True):
 
         return inter / float(union)
 
-    def nms(boxes, types, iou_th=0.20):
-        if not boxes:
-            return boxes, types
+    def nms_iou(cells, types, iou_th=0.22):
+        if not cells:
+            return cells, types
 
         items = []
-
-        for i, b in enumerate(boxes):
+        for i, b in enumerate(cells):
             x, y, w, h = b
-            area = w * h
-            items.append((b, types[i], area))
+            items.append((b, types[i], w * h))
 
         items = sorted(items, key=lambda v: v[2], reverse=True)
 
@@ -211,302 +221,433 @@ def gen_pallet(img, debug=True):
     gray = cv2.cvtColor(norm, cv2.COLOR_BGR2GRAY)
 
     # =========================
-    # COLOR MASKS: FRAME COLORS
+    # COLOR MASKS
     # =========================
 
-    # green rack frame
+    # green rack
     green_mask = cv2.inRange(
         hsv,
         (30, 30, 30),
         (95, 255, 255)
     )
 
-    # cream / beige / gray cage frame
-    cream_mask_1 = cv2.inRange(
+    # cream/beige จริงเท่านั้น ไม่เอา gray wall
+    cream_color_mask = cv2.inRange(
         hsv,
-        (5, 10, 70),
-        (45, 170, 255)
+        (5, 25, 80),
+        (45, 180, 255)
     )
 
-    gray_mask = cv2.inRange(
+    # wood/carton
+    wood_mask = cv2.inRange(
         hsv,
-        (0, 0, 90),
-        (180, 85, 230)
-    )
-
-    cream_mask = cv2.bitwise_or(
-        cream_mask_1,
-        gray_mask
+        (5, 35, 45),
+        (38, 230, 245)
     )
 
     # =========================
-    # CUT ROOF / FLOOR / WHEEL
+    # EDGE + GRID LINE MASK
+    # ใช้จับกรงครีม/เทาที่สีไม่ชัด
     # =========================
-    top_cut = int(rh * 0.18)
-    bottom_cut = int(rh * 0.80)
-
-    for m in [green_mask, cream_mask]:
-        m[:top_cut, :] = 0
-        m[bottom_cut:, :] = 0
-        m[:, :int(rw * 0.01)] = 0
-        m[:, int(rw * 0.99):] = 0
-
-    # =========================
-    # CLEAN COLOR MASKS
-    # =========================
-    green_mask = clean(green_mask, 5, 1, 1)
-    cream_mask = clean(cream_mask, 5, 1, 1)
-
-    # =========================
-    # EXTRACT FRAME / BORDER LINES
-    # =========================
-
-    def extract_frame(mask):
-        # เส้นตั้ง
-        vertical_kernel = cv2.getStructuringElement(
-            cv2.MORPH_RECT,
-            (3, max(25, int(rh * 0.12)))
-        )
-
-        vertical = cv2.morphologyEx(
-            mask,
-            cv2.MORPH_OPEN,
-            vertical_kernel,
-            iterations=1
-        )
-
-        # เส้นนอน
-        horizontal_kernel = cv2.getStructuringElement(
-            cv2.MORPH_RECT,
-            (max(35, int(rw * 0.06)), 3)
-        )
-
-        horizontal = cv2.morphologyEx(
-            mask,
-            cv2.MORPH_OPEN,
-            horizontal_kernel,
-            iterations=1
-        )
-
-        frame = cv2.bitwise_or(vertical, horizontal)
-
-        frame = cv2.morphologyEx(
-            frame,
-            cv2.MORPH_CLOSE,
-            cv2.getStructuringElement(cv2.MORPH_RECT, (11, 7)),
-            iterations=2
-        )
-
-        return frame
-
-    green_frame = extract_frame(green_mask)
-    cream_frame = extract_frame(cream_mask)
-
-    # รวมเฉพาะโครง
-    frame_mask = cv2.bitwise_or(green_frame, cream_frame)
-
-    # ใช้ edge ช่วยเฉพาะบริเวณใกล้ frame เท่านั้น
     edges = cv2.Canny(
         cv2.GaussianBlur(gray, (5, 5), 0),
         50,
         150
     )
 
-    edges[:top_cut, :] = 0
-    edges[bottom_cut:, :] = 0
+    vertical_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (3, max(18, int(rh * 0.08)))
+    )
 
-    frame_dilate = cv2.dilate(
-        frame_mask,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11)),
+    horizontal_kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(28, int(rw * 0.045)), 3)
+    )
+
+    vertical_lines = cv2.morphologyEx(
+        edges,
+        cv2.MORPH_OPEN,
+        vertical_kernel,
         iterations=1
     )
 
-    edge_near_frame = cv2.bitwise_and(edges, frame_dilate)
+    horizontal_lines = cv2.morphologyEx(
+        edges,
+        cv2.MORPH_OPEN,
+        horizontal_kernel,
+        iterations=1
+    )
 
-    pallet_mask = cv2.bitwise_or(frame_mask, edge_near_frame)
+    line_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
 
-    pallet_mask = cv2.morphologyEx(
-        pallet_mask,
+    # =========================
+    # CUT ROOF / FLOOR / WHEEL
+    # =========================
+    top_cut = int(rh * 0.16)
+    bottom_cut = int(rh * 0.82)
+
+    for m in [green_mask, cream_color_mask, wood_mask, edges, line_mask]:
+        m[:top_cut, :] = 0
+        m[bottom_cut:, :] = 0
+        m[:, :int(rw * 0.01)] = 0
+        m[:, int(rw * 0.99):] = 0
+
+    # =========================
+    # CLEAN MASKS
+    # =========================
+    green_mask = clean(green_mask, 5, 1, 1)
+    cream_color_mask = clean(cream_color_mask, 5, 1, 1)
+    wood_mask = clean(wood_mask, 5, 1, 1)
+    line_mask = clean(line_mask, 3, 1, 1)
+
+    # =========================
+    # MATERIAL MASK
+    # ไม่ใช้ white wall แล้ว
+    # =========================
+    material_mask = cv2.bitwise_or(green_mask, cream_color_mask)
+    material_mask = cv2.bitwise_or(material_mask, wood_mask)
+
+    # line เฉพาะที่อยู่โซนของ rack/cage
+    material_or_line = cv2.bitwise_or(material_mask, line_mask)
+
+    # =========================
+    # AUTO CARGO TOP
+    # หาจุดเริ่มของสินค้าจริง เพื่อตัดเพดาน/ผนังบน
+    # =========================
+    row_proj = np.sum(material_or_line > 0, axis=1).astype(np.float32)
+
+    if np.max(row_proj) > 0:
+        smooth_proj = cv2.GaussianBlur(
+            row_proj.reshape(-1, 1),
+            (1, 21),
+            0
+        ).ravel()
+
+        th = np.max(smooth_proj) * 0.20
+        rows = np.where(smooth_proj > th)[0]
+
+        if rows.size > 0:
+            cargo_top = max(top_cut, int(rows.min()) - int(rh * 0.04))
+        else:
+            cargo_top = top_cut
+    else:
+        cargo_top = top_cut
+
+    # กันไม่ให้ cargo_top สูงเกินไป
+    cargo_top = max(top_cut, min(cargo_top, int(rh * 0.55)))
+
+    for m in [green_mask, cream_color_mask, wood_mask, line_mask, material_or_line]:
+        m[:cargo_top, :] = 0
+        m[bottom_cut:, :] = 0
+
+    # =========================
+    # CARGO MASK
+    # ใช้ material + line grid เท่านั้น
+    # =========================
+    cargo_mask = cv2.bitwise_or(material_mask, line_mask)
+
+    cargo_mask[:cargo_top, :] = 0
+    cargo_mask[bottom_cut:, :] = 0
+
+    cargo_mask = cv2.morphologyEx(
+        cargo_mask,
         cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (17, 11)),
+        cv2.getStructuringElement(cv2.MORPH_RECT, (13, 9)),
         iterations=2
     )
 
-    pallet_mask = cv2.morphologyEx(
-        pallet_mask,
+    cargo_mask = cv2.morphologyEx(
+        cargo_mask,
         cv2.MORPH_OPEN,
         cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)),
         iterations=1
     )
 
     # =========================
-    # FIND PALLET FRAME BOXES
+    # FIND BLOCKS
     # =========================
     contours, _ = cv2.findContours(
-        pallet_mask,
+        cargo_mask,
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE
     )
 
-    candidates = []
-    candidate_types = []
+    blocks = []
 
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
 
         area = w * h
 
-        # ขนาดขั้นต่ำ
-        if area < rw * rh * 0.004:
+        if area < rw * rh * 0.0035:
             continue
 
-        if w < rw * 0.055:
+        if w < rw * 0.045:
             continue
 
-        if h < rh * 0.080:
+        if h < rh * 0.070:
             continue
 
         if y + h > bottom_cut:
             continue
 
-        # กันใหญ่เกินไปจนกินทั้งตู้
-        if w > rw * 0.36:
+        if h > rh * 0.60:
             continue
 
-        if h > rh * 0.48:
+        # ต้องมี material หรือ line grid จริงใน block
+        mat = material_mask[y:y + h, x:x + w]
+        lin = line_mask[y:y + h, x:x + w]
+
+        mat_density = cv2.countNonZero(mat) / float(max(1, w * h))
+        line_density = cv2.countNonZero(lin) / float(max(1, w * h))
+
+        if mat_density < 0.006 and line_density < 0.006:
             continue
 
-        box_area = float(max(1, w * h))
+        blocks.append((x, y, w, h))
+
+    blocks = sorted(blocks, key=lambda b: (b[1], b[0]))
+
+    # =========================
+    # SPLIT BLOCKS INTO CELLS
+    # =========================
+    cells = []
+    cell_types = []
+
+    debug_grid = roi.copy()
+    debug_box = roi.copy()
+
+    for (x, y, w, h) in blocks:
+
+        block_area = float(max(1, w * h))
 
         green_ratio = cv2.countNonZero(
-            green_frame[y:y + h, x:x + w]
-        ) / box_area
+            green_mask[y:y + h, x:x + w]
+        ) / block_area
 
         cream_ratio = cv2.countNonZero(
-            cream_frame[y:y + h, x:x + w]
-        ) / box_area
+            cream_color_mask[y:y + h, x:x + w]
+        ) / block_area
 
-        frame_ratio = cv2.countNonZero(
-            frame_mask[y:y + h, x:x + w]
-        ) / box_area
+        wood_ratio = cv2.countNonZero(
+            wood_mask[y:y + h, x:x + w]
+        ) / block_area
 
-        # ต้องมี frame จริง
-        if frame_ratio < 0.010:
+        line_ratio = cv2.countNonZero(
+            line_mask[y:y + h, x:x + w]
+        ) / block_area
+
+        # classify block
+        if green_ratio >= max(cream_ratio, wood_ratio, line_ratio):
+            block_type = "green"
+        elif wood_ratio >= max(green_ratio, cream_ratio, line_ratio):
+            block_type = "wood"
+        else:
+            block_type = "cream"
+
+        # =========================
+        # ESTIMATE GRID SIZE
+        # =========================
+        if block_type == "green":
+            est_cell_w = rw * 0.135
+            est_cell_h = rh * 0.28
+        elif block_type == "cream":
+            est_cell_w = rw * 0.125
+            est_cell_h = rh * 0.25
+        else:
+            est_cell_w = rw * 0.140
+            est_cell_h = rh * 0.28
+
+        cols = int(round(w / max(1.0, est_cell_w)))
+        rows = int(round(h / max(1.0, est_cell_h)))
+
+        cols = max(1, min(6, cols))
+        rows = max(1, min(3, rows))
+
+        if w > rw * 0.25 and cols < 2:
+            cols = 2
+
+        if h > rh * 0.35 and rows < 2:
+            rows = 2
+
+        cv2.rectangle(
+            debug_grid,
+            (x, y),
+            (x + w, y + h),
+            color_by_type(block_type),
+            3
+        )
+
+        cv2.putText(
+            debug_grid,
+            f"{block_type} {cols}x{rows}",
+            (x + 5, max(25, y - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            color_by_type(block_type),
+            2,
+            cv2.LINE_AA
+        )
+
+        for r in range(rows):
+            for c in range(cols):
+                x1 = x + int(c * w / cols)
+                x2 = x + int((c + 1) * w / cols)
+                y1 = y + int(r * h / rows)
+                y2 = y + int((r + 1) * h / rows)
+
+                cw = x2 - x1
+                ch = y2 - y1
+
+                if cw < rw * 0.045:
+                    continue
+
+                if ch < rh * 0.060:
+                    continue
+
+                if y2 > bottom_cut:
+                    continue
+
+                cell_area = float(max(1, cw * ch))
+
+                g = cv2.countNonZero(
+                    green_mask[y1:y2, x1:x2]
+                ) / cell_area
+
+                cr = cv2.countNonZero(
+                    cream_color_mask[y1:y2, x1:x2]
+                ) / cell_area
+
+                wo = cv2.countNonZero(
+                    wood_mask[y1:y2, x1:x2]
+                ) / cell_area
+
+                li = cv2.countNonZero(
+                    line_mask[y1:y2, x1:x2]
+                ) / cell_area
+
+                material_score = max(g, cr, wo)
+                frame_score = max(material_score, li)
+
+                # ตรวจครึ่งล่าง ต้องมีของจริงหรือเส้นกรงจริง
+                lower_y1 = y1 + int(ch * 0.45)
+                lower_area = float(max(1, (y2 - lower_y1) * cw))
+
+                lg = cv2.countNonZero(
+                    green_mask[lower_y1:y2, x1:x2]
+                ) / lower_area
+
+                lcr = cv2.countNonZero(
+                    cream_color_mask[lower_y1:y2, x1:x2]
+                ) / lower_area
+
+                lwo = cv2.countNonZero(
+                    wood_mask[lower_y1:y2, x1:x2]
+                ) / lower_area
+
+                lli = cv2.countNonZero(
+                    line_mask[lower_y1:y2, x1:x2]
+                ) / lower_area
+
+                lower_score = max(lg, lcr, lwo, lli)
+
+                # สำคัญ: กันผนัง/เพดาน
+                if frame_score < 0.010:
+                    continue
+
+                if lower_score < 0.006:
+                    continue
+
+                if y1 < rh * 0.35 and frame_score < 0.020:
+                    continue
+
+                if g >= max(cr, wo, li):
+                    t = "green"
+                elif wo >= max(g, cr, li):
+                    t = "wood"
+                else:
+                    t = "cream"
+
+                cells.append((x1, y1, cw, ch))
+                cell_types.append(t)
+
+                cv2.rectangle(
+                    debug_grid,
+                    (x1, y1),
+                    (x2, y2),
+                    color_by_type(t),
+                    1
+                )
+
+    # =========================
+    # FILTER BAD CELLS
+    # =========================
+    filtered_cells = []
+    filtered_types = []
+
+    for i, (x, y, w, h) in enumerate(cells):
+        t = cell_types[i]
+
+        aspect = w / float(max(1, h))
+
+        if w < rw * 0.050:
             continue
 
-        if green_ratio >= cream_ratio:
-            t = "green"
-        else:
-            t = "cream"
+        if h < rh * 0.065:
+            continue
 
-        candidates.append((x, y, w, h))
-        candidate_types.append(t)
+        if w > rw * 0.34:
+            continue
 
-    # =========================
-    # JIGSAW NORMALIZE BY SIZE
-    # ขยาย/ปรับกรอบให้เป็นขนาด pallet มากขึ้น
-    # =========================
-    def normalize_boxes(boxes, types):
-        if not boxes:
-            return boxes, types
+        if h > rh * 0.45:
+            continue
 
-        ws = []
-        hs = []
-
-        for x, y, w, h in boxes:
-            if w > rw * 0.06:
-                ws.append(w)
-            if h > rh * 0.09:
-                hs.append(h)
-
-        ref_w = int(np.median(ws)) if ws else int(rw * 0.13)
-        ref_h = int(np.median(hs)) if hs else int(rh * 0.20)
-
-        new_boxes = []
-        new_types = []
-
-        for i, (x, y, w, h) in enumerate(boxes):
-            t = types[i]
-
-            cx = x + w / 2
-            cy = y + h / 2
-
-            nw = w
-            nh = h
-
-            if w < ref_w * 0.60:
-                nw = ref_w
-
-            if h < ref_h * 0.60:
-                nh = ref_h
-
-            nx = int(cx - nw / 2)
-            ny = int(cy - nh / 2)
-
-            nx = max(0, nx)
-            ny = max(top_cut, ny)
-
-            if nx + nw > rw:
-                nx = rw - nw
-
-            if ny + nh > bottom_cut:
-                ny = bottom_cut - nh
-
-            nx = max(0, nx)
-            ny = max(top_cut, ny)
-
-            x1 = int(nx)
-            y1 = int(ny)
-            x2 = int(nx + nw)
-            y2 = int(ny + nh)
-
-            area = float(max(1, (x2 - x1) * (y2 - y1)))
-
-            fr = cv2.countNonZero(
-                frame_mask[y1:y2, x1:x2]
-            ) / area
-
-            if fr < 0.006:
+        if t in ["cream", "wood"]:
+            if aspect < 0.35 or aspect > 3.80:
                 continue
 
-            new_boxes.append((x1, y1, x2 - x1, y2 - y1))
-            new_types.append(t)
+        filtered_cells.append((x, y, w, h))
+        filtered_types.append(t)
 
-        return new_boxes, new_types
+    cells = filtered_cells
+    cell_types = filtered_types
 
-    candidates, candidate_types = normalize_boxes(
-        candidates,
-        candidate_types
-    )
-
-    candidates, candidate_types = nms(
-        candidates,
-        candidate_types,
-        iou_th=0.18
+    # =========================
+    # NMS
+    # =========================
+    cells, cell_types = nms_iou(
+        cells,
+        cell_types,
+        iou_th=0.22
     )
 
     # =========================
     # FINAL DRAW
     # =========================
-    debug_box = roi.copy()
-    debug_frame = roi.copy()
-
     counts = {
         "green": 0,
-        "cream": 0
+        "cream": 0,
+        "wood": 0,
+        "unknown": 0
     }
 
-    for i, (x, y, w, h) in enumerate(candidates, 1):
-        t = candidate_types[i - 1]
+    for i, (x, y, w, h) in enumerate(cells, 1):
+        t = cell_types[i - 1]
 
         if t not in counts:
             counts[t] = 0
 
         counts[t] += 1
 
-        color = color_by_type(t)
-
-        prefix = "G" if t == "green" else "C"
+        if t == "green":
+            prefix = "G"
+        elif t == "cream":
+            prefix = "C"
+        elif t == "wood":
+            prefix = "W"
+        else:
+            prefix = "U"
 
         cv2.rectangle(
             debug_box,
@@ -527,19 +668,11 @@ def gen_pallet(img, debug=True):
             cv2.LINE_AA
         )
 
-        cv2.rectangle(
-            debug_frame,
-            (x, y),
-            (x + w, y + h),
-            color,
-            2
-        )
-
-    total = len(candidates)
+    total = len(cells)
 
     cv2.putText(
         debug_box,
-        f"T={total} G={counts['green']} C={counts['cream']}",
+        f"T={total} G={counts['green']} C={counts['cream']} W={counts['wood']}",
         (20, 40),
         cv2.FONT_HERSHEY_SIMPLEX,
         1.0,
@@ -549,10 +682,12 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET FRAME DETECTION")
-    print(f"TOTAL : {total}")
-    print(f"GREEN : {counts['green']}")
-    print(f"CREAM : {counts['cream']}")
+    print("PALLET BORDER DETECTION - GREEN / CREAM")
+    print(f"BLOCKS : {len(blocks)}")
+    print(f"TOTAL  : {total}")
+    print(f"GREEN  : {counts['green']}")
+    print(f"CREAM  : {counts['cream']}")
+    print(f"WOOD   : {counts['wood']}")
     print("=" * 50)
 
     # =========================
@@ -560,17 +695,17 @@ def gen_pallet(img, debug=True):
     # =========================
     if debug:
         save_dbg("debug_original.jpg", roi)
+        save_dbg("debug_normalized.jpg", norm)
         save_dbg("debug_green_mask.jpg", green_mask)
-        save_dbg("debug_cream_mask.jpg", cream_mask)
-        save_dbg("debug_green_frame.jpg", green_frame)
-        save_dbg("debug_cream_frame.jpg", cream_frame)
+        save_dbg("debug_cream_mask.jpg", cream_color_mask)
+        save_dbg("debug_wood_mask.jpg", wood_mask)
         save_dbg("debug_edges.jpg", edges)
-        save_dbg("debug_pallet_mask.jpg", pallet_mask)
-        save_dbg("debug_frame_box.jpg", debug_frame)
+        save_dbg("debug_line_mask.jpg", line_mask)
+        save_dbg("debug_cargo.jpg", cargo_mask)
+        save_dbg("debug_grid.jpg", debug_grid)
         save_dbg("debug_pallet_box.jpg", debug_box)
 
     return total
-
 # =========================
 # APPSHEET
 # =========================
