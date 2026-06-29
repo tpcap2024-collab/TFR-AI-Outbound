@@ -243,7 +243,7 @@ def gen_pallet(img, debug=True):
         keep_boxes = []
         keep_types = []
 
-        for b, t, _ in items:
+        for b, t, area in items:
             duplicate = False
 
             for old in keep_boxes:
@@ -310,30 +310,36 @@ def gen_pallet(img, debug=True):
     # =========================
     # COLOR MASKS
     # =========================
+
+    # เขียว rack
     green_mask = cv2.inRange(
         hsv,
         (30, 28, 28),
         (100, 255, 255)
     )
 
+    # น้ำเงิน rack
     blue_mask = cv2.inRange(
         hsv,
         (85, 30, 30),
         (140, 255, 255)
     )
 
+    # ครีม / beige cage
     cream_mask = cv2.inRange(
         hsv,
         (4, 18, 65),
         (48, 200, 255)
     )
 
+    # ไม้ / carton ใช้ classify เท่านั้น ไม่ใช้เป็น seed หลัก
     wood_mask = cv2.inRange(
         hsv,
         (5, 30, 35),
         (38, 240, 255)
     )
 
+    # ตัดหลังคา / พื้นล่าง / ขอบภาพ
     for m in [green_mask, blue_mask, cream_mask, wood_mask]:
         m[:top_cut, :] = 0
         m[bottom_cut:, :] = 0
@@ -345,8 +351,7 @@ def gen_pallet(img, debug=True):
     cream_mask = clean(cream_mask, 5, 1, 1)
     wood_mask = clean(wood_mask, 5, 1, 1)
 
-    # material_mask ใช้ validate / classify เท่านั้น
-    # ห้ามเอาไปเป็น object_seed
+    # ใช้ validate/classify เท่านั้น
     material_mask = cv2.bitwise_or(green_mask, blue_mask)
     material_mask = cv2.bitwise_or(material_mask, cream_mask)
     material_mask = cv2.bitwise_or(material_mask, wood_mask)
@@ -405,6 +410,7 @@ def gen_pallet(img, debug=True):
     )
 
     # cream ใช้เฉพาะส่วนที่ซ้อนกับ line เท่านั้น
+    # เพื่อไม่ให้ครีม/กล่องด้านในกลายเป็น seed ทั้งก้อน
     cream_edge = cv2.bitwise_and(
         cream_mask,
         line_mask
@@ -469,13 +475,14 @@ def gen_pallet(img, debug=True):
     )
 
     # =========================
-    # OBJECT SEED - FRAME ONLY
+    # OBJECT SEED
+    # ใช้เฉพาะ frame เท่านั้น
     # =========================
     object_seed = frame_mask.copy()
 
     # =========================
     # CLEAN OBJECT SEED
-    # เพิ่มล่าสุด: ตัดหลังคา / คานยาว / พื้นรถ / ก้อนใหญ่ผิดรูป
+    # ตัดหลังคา / คานยาว / พื้นรถ / ก้อนใหญ่ผิดรูป
     # =========================
     def clean_object_seed(seed):
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -513,7 +520,7 @@ def gen_pallet(img, debug=True):
             if y > rh * 0.62 and h < rh * 0.12:
                 continue
 
-            # ตัดก้อนใหญ่เกินที่น่าจะเป็นผนัง/หลังคา
+            # ตัดก้อนใหญ่เกิน ผนัง/หลังคา
             if w > rw * 0.65 and h > rh * 0.35:
                 continue
 
@@ -531,7 +538,9 @@ def gen_pallet(img, debug=True):
     object_seed = clean_object_seed(object_seed)
 
     # =========================
-    # CLASSIFY BY BORDER
+    # CLASSIFY BY BORDER ONLY
+    # สำคัญ: แยกสีจาก "ขอบ" เท่านั้น
+    # ไม่ใช้กล่อง/ของ/พื้นที่ตรงกลาง
     # =========================
     def classify_by_border(x, y, w, h):
         if w <= 0 or h <= 0:
@@ -542,12 +551,21 @@ def gen_pallet(img, debug=True):
         x2 = x + w
         y2 = y + h
 
-        border = max(6, int(min(w, h) * 0.13))
+        # ขอบหนาขึ้น เพื่อจับสีโครงจริง ไม่ดูตรงกลาง
+        border = max(8, int(min(w, h) * 0.16))
 
         border_mask = np.zeros((h, w), dtype=np.uint8)
+
+        # top
         border_mask[:border, :] = 255
+
+        # bottom
         border_mask[h - border:, :] = 255
+
+        # left
         border_mask[:, :border] = 255
+
+        # right
         border_mask[:, w - border:] = 255
 
         border_area = float(max(1, cv2.countNonZero(border_mask)))
@@ -558,47 +576,101 @@ def gen_pallet(img, debug=True):
         w_crop = wood_mask[y1:y2, x1:x2]
         f_crop = frame_mask[y1:y2, x1:x2]
 
-        g = cv2.countNonZero(cv2.bitwise_and(g_crop, border_mask)) / border_area
-        bl = cv2.countNonZero(cv2.bitwise_and(b_crop, border_mask)) / border_area
-        c = cv2.countNonZero(cv2.bitwise_and(c_crop, border_mask)) / border_area
-        wd = cv2.countNonZero(cv2.bitwise_and(w_crop, border_mask)) / border_area
-        fr = cv2.countNonZero(cv2.bitwise_and(f_crop, border_mask)) / border_area
+        g_border = cv2.countNonZero(
+            cv2.bitwise_and(g_crop, border_mask)
+        ) / border_area
 
+        b_border = cv2.countNonZero(
+            cv2.bitwise_and(b_crop, border_mask)
+        ) / border_area
+
+        c_border = cv2.countNonZero(
+            cv2.bitwise_and(c_crop, border_mask)
+        ) / border_area
+
+        w_border = cv2.countNonZero(
+            cv2.bitwise_and(w_crop, border_mask)
+        ) / border_area
+
+        f_border = cv2.countNonZero(
+            cv2.bitwise_and(f_crop, border_mask)
+        ) / border_area
+
+        # =========================
+        # LOWER BORDER CHECK
+        # กันผนัง / พื้น / ช่องว่าง
+        # =========================
         lower_y1 = y + int(h * 0.45)
         lower_area = float(max(1, (y + h - lower_y1) * w))
 
-        lg = cv2.countNonZero(green_mask[lower_y1:y + h, x:x + w]) / lower_area
-        lb = cv2.countNonZero(blue_mask[lower_y1:y + h, x:x + w]) / lower_area
-        lc = cv2.countNonZero(cream_mask[lower_y1:y + h, x:x + w]) / lower_area
-        lw = cv2.countNonZero(wood_mask[lower_y1:y + h, x:x + w]) / lower_area
-        lf = cv2.countNonZero(frame_mask[lower_y1:y + h, x:x + w]) / lower_area
+        lg = cv2.countNonZero(
+            green_mask[lower_y1:y + h, x:x + w]
+        ) / lower_area
+
+        lb = cv2.countNonZero(
+            blue_mask[lower_y1:y + h, x:x + w]
+        ) / lower_area
+
+        lc = cv2.countNonZero(
+            cream_mask[lower_y1:y + h, x:x + w]
+        ) / lower_area
+
+        lw = cv2.countNonZero(
+            wood_mask[lower_y1:y + h, x:x + w]
+        ) / lower_area
+
+        lf = cv2.countNonZero(
+            frame_mask[lower_y1:y + h, x:x + w]
+        ) / lower_area
 
         lower_score = max(lg, lb, lc, lw, lf)
 
         if lower_score < 0.004:
             return "unknown"
 
-        # blue
-        if bl > 0.030 and bl > g * 1.25 and bl > c * 1.35:
+        # =========================
+        # CLASSIFY FROM BORDER ONLY
+        # =========================
+
+        # น้ำเงิน: ต้องชัดจากขอบ
+        if (
+            b_border > 0.025 and
+            b_border > g_border * 1.20 and
+            b_border > c_border * 1.20
+        ):
             return "blue"
 
-        # green
-        if g > 0.022 and g > bl * 1.15 and g > c * 1.15:
+        # เขียว
+        if (
+            g_border > 0.022 and
+            g_border > b_border * 1.15 and
+            g_border > c_border * 1.15
+        ):
             return "green"
 
-        # wood เฉพาะขอบไม้ชัดจริง
-        if wd > 0.060 and wd > c * 1.30 and wd > g:
-            return "wood"
-
-        # cream / frame
-        if c > 0.010 or fr > 0.008:
+        # ครีม / กรง
+        if (
+            c_border > 0.012 and
+            c_border >= b_border * 0.80
+        ):
             return "cream"
+
+        # ถ้าเห็น frame ชัด แต่สีไม่ชัด ให้ถือเป็นครีม
+        if f_border > 0.010:
+            return "cream"
+
+        # ไม้ ต้องเป็นขอบไม้จริง ไม่ใช่กล่องด้านใน
+        if (
+            w_border > 0.060 and
+            w_border > c_border * 1.30 and
+            w_border > g_border
+        ):
+            return "wood"
 
         return "unknown"
 
     # =========================
     # VALID PALLET BOX
-    # ผ่อน threshold ล่าสุด ไม่ให้ตัดหมด
     # =========================
     def valid_pallet_box(x, y, w, h):
 
@@ -608,11 +680,22 @@ def gen_pallet(img, debug=True):
         if y + h > bottom_cut:
             return False
 
+        # กันโซนล่าง พื้นถนน ล้อ คานล่าง
+        if y > rh * 0.68:
+            return False
+
+        if y > rh * 0.58 and h < rh * 0.18:
+            return False
+
         # ไม่เล็กเกิน
         if w < rw * 0.045:
             return False
 
         if h < rh * 0.065:
+            return False
+
+        # กันชิ้นส่วนเล็กด้านบน เช่น label / คาน / เศษ edge
+        if y < rh * 0.30 and h < rh * 0.16:
             return False
 
         # ไม่ใหญ่เกิน
@@ -641,7 +724,6 @@ def gen_pallet(img, debug=True):
             material_mask[y:y + h, x:x + w]
         ) / area
 
-        # ผ่อนล่าสุด
         if frame_den < 0.0025 and material_den < 0.0025:
             return False
 
@@ -656,7 +738,6 @@ def gen_pallet(img, debug=True):
             material_mask[lower_y1:y + h, x:x + w]
         ) / lower_area
 
-        # ผ่อนล่าสุด
         if max(lower_frame, lower_material) < 0.002:
             return False
 
@@ -793,7 +874,7 @@ def gen_pallet(img, debug=True):
     )
 
     print("=" * 50)
-    print("PALLET FRAME ONLY DETECTION - NO GRID")
+    print("PALLET FRAME ONLY DETECTION - BORDER COLOR ONLY")
     print(f"RAW    : {len(raw_candidates)}")
     print(f"TOTAL  : {total}")
     print(f"GREEN  : {counts['green']}")
