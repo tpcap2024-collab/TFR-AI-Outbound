@@ -3,24 +3,27 @@ import requests
 import cv2
 import numpy as np
 import traceback
+import time
 import threading
 import os
 
 app = Flask(__name__)
 
+
 # =========================
 # APPSHEET CONFIG
-# ใส่ค่าจริงเอง
 # =========================
 APP_ID = "5ebec09a-62dd-4fa9-8f14-830fb104518f"
 ACCESS_KEY = "V2-2ZX8p-jmYBx-bH09l-nFTYW-cvV8W-7wNy3-zqOQQ-JvMrp"
 TABLE_NAME = "Data TFR"
+
 
 # =========================
 # DEBUG CONFIG
 # =========================
 DEBUG_DIR = "/tmp"
 os.makedirs(DEBUG_DIR, exist_ok=True)
+
 
 # =========================
 # LOCK
@@ -36,19 +39,15 @@ def download_image(url):
     try:
         r = requests.get(
             url,
-            timeout=20,
+            timeout=15,
             allow_redirects=True,
             headers={
                 "User-Agent": "Mozilla/5.0"
             }
         )
 
-        print("IMAGE STATUS:", r.status_code)
-        print("IMAGE CONTENT TYPE:", r.headers.get("Content-Type"))
-
         if r.status_code != 200:
             print("IMAGE HTTP ERROR:", r.status_code)
-            print(r.text[:300])
             return None
 
         img = cv2.imdecode(
@@ -56,51 +55,58 @@ def download_image(url):
             cv2.IMREAD_COLOR
         )
 
-        if img is None:
-            print("IMAGE DECODE FAILED")
-            return None
-
-        print("IMAGE SHAPE:", img.shape)
-
         return img
 
     except Exception as e:
         print("DOWNLOAD ERROR:", e)
-        print(traceback.format_exc())
         return None
 
 
 # =========================
 # DEBUG SAVE
 # =========================
-def save_debug(name, img):
+def save_debug(filename, img):
     try:
-        if img is None:
-            print("SAVE DEBUG ERROR:", name, "image is None")
-            return False
-
-        path = os.path.join(DEBUG_DIR, name)
-
+        path = os.path.join(DEBUG_DIR, filename)
         ok = cv2.imwrite(path, img)
-
-        exists = os.path.exists(path)
-        size = os.path.getsize(path) if exists else 0
-
-        print(
-            f"SAVE DEBUG {name}: "
-            f"ok={ok} exists={exists} size={size} path={path}"
-        )
-
+        print(f"SAVE DEBUG {filename}: {ok}")
         return ok
 
     except Exception as e:
-        print("SAVE DEBUG ERROR:", name, e)
-        print(traceback.format_exc())
+        print("SAVE DEBUG ERROR:", filename, e)
         return False
 
 
 # =========================
-# OUTBOUND VOLUME MODEL
+# CLEAN MASK
+# =========================
+def clean_mask(mask, min_area_ratio=0.002):
+    if mask is None or mask.size == 0:
+        return mask
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask,
+        connectivity=8
+    )
+
+    result = np.zeros_like(mask)
+
+    min_area = int(mask.size * min_area_ratio)
+
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+
+        if area > min_area:
+            result[labels == i] = 255
+
+    return result
+
+
+# =========================
+# BALANCED VOLUME MODEL
+# =========================
+# =========================
+# BALANCED VOLUME MODEL
 # =========================
 def gen_volume(img, debug=True, return_empty=False):
 
@@ -695,751 +701,9 @@ def gen_volume(img, debug=True, return_empty=False):
 
 
 # =========================
-# INBOUND PALLET MODEL
-# Edge / Frame detection: cream + green + wood
+# UPDATE APPSHEET
 # =========================
-def gen_pallet(img, debug=True):
-
-    if img is None or img.size == 0:
-        return "G00C00B00W00"
-
-    # =========================
-    # HELPERS
-    # =========================
-    def save_dbg(name, im):
-        if debug and im is not None:
-            save_debug(name, im)
-
-    def clean(mask, k=5, close_it=1, open_it=1):
-        ker = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-
-        if close_it > 0:
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_CLOSE,
-                ker,
-                iterations=close_it
-            )
-
-        if open_it > 0:
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_OPEN,
-                ker,
-                iterations=open_it
-            )
-
-        return mask
-
-    def box_iou(a, b):
-        ax, ay, aw, ah = a
-        bx, by, bw, bh = b
-
-        ax2 = ax + aw
-        ay2 = ay + ah
-        bx2 = bx + bw
-        by2 = by + bh
-
-        ix1 = max(ax, bx)
-        iy1 = max(ay, by)
-        ix2 = min(ax2, bx2)
-        iy2 = min(ay2, by2)
-
-        iw = max(0, ix2 - ix1)
-        ih = max(0, iy2 - iy1)
-
-        inter = iw * ih
-        union = aw * ah + bw * bh - inter
-
-        if union <= 0:
-            return 0.0
-
-        return inter / float(union)
-
-    def nms_iou(boxes, types, iou_th=0.18):
-        if not boxes:
-            return boxes, types
-
-        items = []
-
-        for i, b in enumerate(boxes):
-            x, y, w, h = b
-            area = w * h
-            items.append((b, types[i], area))
-
-        items = sorted(items, key=lambda v: v[2], reverse=True)
-
-        keep_boxes = []
-        keep_types = []
-
-        for b, t, area in items:
-            duplicate = False
-
-            for old in keep_boxes:
-                if box_iou(b, old) > iou_th:
-                    duplicate = True
-                    break
-
-                x, y, w, h = b
-                ox, oy, ow, oh = old
-
-                ix1 = max(x, ox)
-                iy1 = max(y, oy)
-                ix2 = min(x + w, ox + ow)
-                iy2 = min(y + h, oy + oh)
-
-                inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-                small_area = min(w * h, ow * oh)
-
-                if small_area > 0 and inter / float(small_area) > 0.55:
-                    duplicate = True
-                    break
-
-            if not duplicate:
-                keep_boxes.append(b)
-                keep_types.append(t)
-
-        return keep_boxes, keep_types
-
-    # =========================
-    # RESIZE + ROI
-    # =========================
-    img = cv2.resize(img, (1280, 720))
-    H, W = img.shape[:2]
-
-    roi = img[
-        int(H * 0.12):int(H * 0.86),
-        int(W * 0.02):int(W * 0.98)
-    ]
-
-    rh, rw = roi.shape[:2]
-
-    top_cut = int(rh * 0.15)
-    bottom_cut = int(rh * 0.84)
-
-    # =========================
-    # LIGHT NORMALIZE
-    # =========================
-    lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-
-    l = cv2.createCLAHE(
-        clipLimit=2.0,
-        tileGridSize=(8, 8)
-    ).apply(l)
-
-    norm = cv2.cvtColor(
-        cv2.merge((l, a, b)),
-        cv2.COLOR_LAB2BGR
-    )
-
-    hsv = cv2.cvtColor(norm, cv2.COLOR_BGR2HSV)
-    gray = cv2.cvtColor(norm, cv2.COLOR_BGR2GRAY)
-
-    # =========================
-    # COLOR MASKS
-    # =========================
-
-    # เขียว rack
-    green_mask = cv2.inRange(
-        hsv,
-        (30, 28, 28),
-        (100, 255, 255)
-    )
-
-    # น้ำเงิน rack
-    blue_mask = cv2.inRange(
-        hsv,
-        (85, 30, 30),
-        (140, 255, 255)
-    )
-
-    # ครีม / beige cage
-    cream_mask = cv2.inRange(
-        hsv,
-        (4, 18, 65),
-        (48, 200, 255)
-    )
-
-    # ไม้ / carton ใช้ classify เท่านั้น ไม่ใช้เป็น seed หลัก
-    wood_mask = cv2.inRange(
-        hsv,
-        (5, 30, 35),
-        (38, 240, 255)
-    )
-
-    # ตัดหลังคา / พื้นล่าง / ขอบภาพ
-    for m in [green_mask, blue_mask, cream_mask, wood_mask]:
-        m[:top_cut, :] = 0
-        m[bottom_cut:, :] = 0
-        m[:, :int(rw * 0.01)] = 0
-        m[:, int(rw * 0.99):] = 0
-
-    green_mask = clean(green_mask, 5, 1, 1)
-    blue_mask = clean(blue_mask, 5, 1, 1)
-    cream_mask = clean(cream_mask, 5, 1, 1)
-    wood_mask = clean(wood_mask, 5, 1, 1)
-
-    # ใช้ validate/classify เท่านั้น
-    material_mask = cv2.bitwise_or(green_mask, blue_mask)
-    material_mask = cv2.bitwise_or(material_mask, cream_mask)
-    material_mask = cv2.bitwise_or(material_mask, wood_mask)
-
-    # =========================
-    # EDGE / LINE MASK
-    # =========================
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
-    edge_base = cv2.Canny(
-        blur,
-        30,
-        120
-    )
-
-    edge_base[:top_cut, :] = 0
-    edge_base[bottom_cut:, :] = 0
-
-    vertical_kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (3, max(18, int(rh * 0.075)))
-    )
-
-    horizontal_kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT,
-        (max(28, int(rw * 0.040)), 3)
-    )
-
-    vertical_lines = cv2.morphologyEx(
-        edge_base,
-        cv2.MORPH_OPEN,
-        vertical_kernel,
-        iterations=1
-    )
-
-    horizontal_lines = cv2.morphologyEx(
-        edge_base,
-        cv2.MORPH_OPEN,
-        horizontal_kernel,
-        iterations=1
-    )
-
-    line_mask = cv2.bitwise_or(
-        vertical_lines,
-        horizontal_lines
-    )
-
-    # =========================
-    # FRAME SEED ONLY
-    # =========================
-
-    # green/blue เป็น frame ได้โดยตรง
-    color_frame_mask = cv2.bitwise_or(
-        green_mask,
-        blue_mask
-    )
-
-    # cream ใช้เฉพาะส่วนที่ซ้อนกับ line เท่านั้น
-    # เพื่อไม่ให้ครีม/กล่องด้านในกลายเป็น seed ทั้งก้อน
-    cream_edge = cv2.bitwise_and(
-        cream_mask,
-        line_mask
-    )
-
-    color_frame_mask = cv2.bitwise_or(
-        color_frame_mask,
-        cream_edge
-    )
-
-    frame_color_dilate = cv2.dilate(
-        color_frame_mask,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (35, 25)),
-        iterations=1
-    )
-
-    line_near_frame = cv2.bitwise_and(
-        line_mask,
-        frame_color_dilate
-    )
-
-    lower_zone = np.zeros_like(line_mask)
-    lower_zone[int(rh * 0.28):bottom_cut, :] = 255
-
-    line_lower = cv2.bitwise_and(
-        line_mask,
-        lower_zone
-    )
-
-    line_lower_near_frame = cv2.bitwise_and(
-        line_lower,
-        frame_color_dilate
-    )
-
-    frame_mask = cv2.bitwise_or(
-        color_frame_mask,
-        line_near_frame
-    )
-
-    frame_mask = cv2.bitwise_or(
-        frame_mask,
-        line_lower_near_frame
-    )
-
-    frame_mask[:top_cut, :] = 0
-    frame_mask[bottom_cut:, :] = 0
-    frame_mask[:, :int(rw * 0.01)] = 0
-    frame_mask[:, int(rw * 0.99):] = 0
-
-    frame_mask = cv2.morphologyEx(
-        frame_mask,
-        cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3)),
-        iterations=1
-    )
-
-    frame_mask = cv2.morphologyEx(
-        frame_mask,
-        cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
-        iterations=1
-    )
-
-    # =========================
-    # OBJECT SEED
-    # ใช้เฉพาะ frame เท่านั้น
-    # =========================
-    object_seed = frame_mask.copy()
-
-    # =========================
-    # CLEAN OBJECT SEED
-    # ตัดหลังคา / คานยาว / พื้นรถ / ก้อนใหญ่ผิดรูป
-    # =========================
-    def clean_object_seed(seed):
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-            seed,
-            connectivity=8
-        )
-
-        result = np.zeros_like(seed)
-
-        for i in range(1, num_labels):
-            x = stats[i, cv2.CC_STAT_LEFT]
-            y = stats[i, cv2.CC_STAT_TOP]
-            w = stats[i, cv2.CC_STAT_WIDTH]
-            h = stats[i, cv2.CC_STAT_HEIGHT]
-            area = stats[i, cv2.CC_STAT_AREA]
-
-            if area < rw * rh * 0.0004:
-                continue
-
-            if w < rw * 0.025:
-                continue
-
-            if h < rh * 0.030:
-                continue
-
-            # ตัดหลังคา / เงาด้านบน
-            if y < rh * 0.18 and h < rh * 0.16:
-                continue
-
-            # ตัดคานยาวแนวนอน
-            if w > rw * 0.55 and h < rh * 0.12:
-                continue
-
-            # ตัดพื้นรถ / กันชน / ราวล่าง
-            if y > rh * 0.62 and h < rh * 0.12:
-                continue
-
-            # ตัดก้อนใหญ่เกิน ผนัง/หลังคา
-            if w > rw * 0.65 and h > rh * 0.35:
-                continue
-
-            result[labels == i] = 255
-
-        result = cv2.morphologyEx(
-            result,
-            cv2.MORPH_CLOSE,
-            cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3)),
-            iterations=1
-        )
-
-        return result
-
-    object_seed = clean_object_seed(object_seed)
-
-    # =========================
-    # CLASSIFY BY BORDER ONLY
-    # สำคัญ: แยกสีจาก "ขอบ" เท่านั้น
-    # ไม่ใช้กล่อง/ของ/พื้นที่ตรงกลาง
-    # =========================
-    def classify_by_border(x, y, w, h):
-        if w <= 0 or h <= 0:
-            return "unknown"
-
-        x1 = x
-        y1 = y
-        x2 = x + w
-        y2 = y + h
-
-        # ขอบหนาขึ้น เพื่อจับสีโครงจริง ไม่ดูตรงกลาง
-        border = max(8, int(min(w, h) * 0.16))
-
-        border_mask = np.zeros((h, w), dtype=np.uint8)
-
-        # top
-        border_mask[:border, :] = 255
-
-        # bottom
-        border_mask[h - border:, :] = 255
-
-        # left
-        border_mask[:, :border] = 255
-
-        # right
-        border_mask[:, w - border:] = 255
-
-        border_area = float(max(1, cv2.countNonZero(border_mask)))
-
-        g_crop = green_mask[y1:y2, x1:x2]
-        b_crop = blue_mask[y1:y2, x1:x2]
-        c_crop = cream_mask[y1:y2, x1:x2]
-        w_crop = wood_mask[y1:y2, x1:x2]
-        f_crop = frame_mask[y1:y2, x1:x2]
-
-        g_border = cv2.countNonZero(
-            cv2.bitwise_and(g_crop, border_mask)
-        ) / border_area
-
-        b_border = cv2.countNonZero(
-            cv2.bitwise_and(b_crop, border_mask)
-        ) / border_area
-
-        c_border = cv2.countNonZero(
-            cv2.bitwise_and(c_crop, border_mask)
-        ) / border_area
-
-        w_border = cv2.countNonZero(
-            cv2.bitwise_and(w_crop, border_mask)
-        ) / border_area
-
-        f_border = cv2.countNonZero(
-            cv2.bitwise_and(f_crop, border_mask)
-        ) / border_area
-
-        # =========================
-        # LOWER BORDER CHECK
-        # กันผนัง / พื้น / ช่องว่าง
-        # =========================
-        lower_y1 = y + int(h * 0.45)
-        lower_area = float(max(1, (y + h - lower_y1) * w))
-
-        lg = cv2.countNonZero(
-            green_mask[lower_y1:y + h, x:x + w]
-        ) / lower_area
-
-        lb = cv2.countNonZero(
-            blue_mask[lower_y1:y + h, x:x + w]
-        ) / lower_area
-
-        lc = cv2.countNonZero(
-            cream_mask[lower_y1:y + h, x:x + w]
-        ) / lower_area
-
-        lw = cv2.countNonZero(
-            wood_mask[lower_y1:y + h, x:x + w]
-        ) / lower_area
-
-        lf = cv2.countNonZero(
-            frame_mask[lower_y1:y + h, x:x + w]
-        ) / lower_area
-
-        lower_score = max(lg, lb, lc, lw, lf)
-
-        if lower_score < 0.004:
-            return "unknown"
-
-        # =========================
-        # CLASSIFY FROM BORDER ONLY
-        # =========================
-
-        # น้ำเงิน: ต้องชัดจากขอบ
-        if (
-            b_border > 0.025 and
-            b_border > g_border * 1.20 and
-            b_border > c_border * 1.20
-        ):
-            return "blue"
-
-        # เขียว
-        if (
-            g_border > 0.022 and
-            g_border > b_border * 1.15 and
-            g_border > c_border * 1.15
-        ):
-            return "green"
-
-        # ครีม / กรง
-        if (
-            c_border > 0.012 and
-            c_border >= b_border * 0.80
-        ):
-            return "cream"
-
-        # ถ้าเห็น frame ชัด แต่สีไม่ชัด ให้ถือเป็นครีม
-        if f_border > 0.010:
-            return "cream"
-
-        # ไม้ ต้องเป็นขอบไม้จริง ไม่ใช่กล่องด้านใน
-        if (
-            w_border > 0.060 and
-            w_border > c_border * 1.30 and
-            w_border > g_border
-        ):
-            return "wood"
-
-        return "unknown"
-
-    # =========================
-    # VALID PALLET BOX
-    # =========================
-    def valid_pallet_box(x, y, w, h):
-
-        if y < top_cut:
-            return False
-
-        if y + h > bottom_cut:
-            return False
-
-        # กันโซนล่าง พื้นถนน ล้อ คานล่าง
-        if y > rh * 0.68:
-            return False
-
-        if y > rh * 0.58 and h < rh * 0.18:
-            return False
-
-        # ไม่เล็กเกิน
-        if w < rw * 0.045:
-            return False
-
-        if h < rh * 0.065:
-            return False
-
-        # กันชิ้นส่วนเล็กด้านบน เช่น label / คาน / เศษ edge
-        if y < rh * 0.30 and h < rh * 0.16:
-            return False
-
-        # ไม่ใหญ่เกิน
-        if w > rw * 0.48:
-            return False
-
-        if h > rh * 0.62:
-            return False
-
-        aspect = w / float(max(1, h))
-
-        # ไม่เป็นเสา ไม่เป็นคานแบน
-        if aspect < 0.32:
-            return False
-
-        if aspect > 4.20:
-            return False
-
-        area = float(max(1, w * h))
-
-        frame_den = cv2.countNonZero(
-            frame_mask[y:y + h, x:x + w]
-        ) / area
-
-        material_den = cv2.countNonZero(
-            material_mask[y:y + h, x:x + w]
-        ) / area
-
-        if frame_den < 0.0025 and material_den < 0.0025:
-            return False
-
-        lower_y1 = y + int(h * 0.45)
-        lower_area = float(max(1, (y + h - lower_y1) * w))
-
-        lower_frame = cv2.countNonZero(
-            frame_mask[lower_y1:y + h, x:x + w]
-        ) / lower_area
-
-        lower_material = cv2.countNonZero(
-            material_mask[lower_y1:y + h, x:x + w]
-        ) / lower_area
-
-        if max(lower_frame, lower_material) < 0.002:
-            return False
-
-        return True
-
-    # =========================
-    # FIND COMPONENTS FROM CLEAN OBJECT SEED
-    # =========================
-    contours, _ = cv2.findContours(
-        object_seed,
-        cv2.RETR_EXTERNAL,
-        cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    raw_candidates = []
-    raw_types = []
-
-    debug_reject = roi.copy()
-
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-
-        area = w * h
-
-        if area < rw * rh * 0.0012:
-            continue
-
-        if w < rw * 0.030:
-            continue
-
-        if h < rh * 0.045:
-            continue
-
-        if not valid_pallet_box(x, y, w, h):
-            cv2.rectangle(
-                debug_reject,
-                (x, y),
-                (x + w, y + h),
-                (80, 80, 80),
-                1
-            )
-            continue
-
-        t = classify_by_border(x, y, w, h)
-
-        if t == "unknown":
-            cv2.rectangle(
-                debug_reject,
-                (x, y),
-                (x + w, y + h),
-                (200, 200, 200),
-                1
-            )
-            continue
-
-        raw_candidates.append((x, y, w, h))
-        raw_types.append(t)
-
-    candidates, candidate_types = nms_iou(
-        raw_candidates,
-        raw_types,
-        iou_th=0.18
-    )
-
-    # =========================
-    # FINAL DRAW + COUNT
-    # =========================
-    debug_box = roi.copy()
-
-    counts = {
-        "green": 0,
-        "blue": 0,
-        "cream": 0,
-        "wood": 0,
-        "unknown": 0
-    }
-
-    for i, (x, y, w, h) in enumerate(candidates, 1):
-        t = candidate_types[i - 1]
-
-        if t not in counts:
-            counts[t] = 0
-
-        counts[t] += 1
-
-        if t == "green":
-            prefix = "G"
-        elif t == "blue":
-            prefix = "B"
-        elif t == "cream":
-            prefix = "C"
-        elif t == "wood":
-            prefix = "W"
-        else:
-            prefix = "U"
-
-        cv2.rectangle(
-            debug_box,
-            (x, y),
-            (x + w, y + h),
-            (0, 0, 255),
-            3
-        )
-
-        cv2.putText(
-            debug_box,
-            f"{prefix}{counts[t]}",
-            (x + 6, y + 28),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (0, 0, 255),
-            2,
-            cv2.LINE_AA
-        )
-
-    total = len(candidates)
-
-    result_code = (
-        f"G{counts['green']:02d}"
-        f"C{counts['cream']:02d}"
-        f"B{counts['blue']:02d}"
-        f"W{counts['wood']:02d}"
-    )
-
-    cv2.putText(
-        debug_box,
-        f"T={total} {result_code}",
-        (20, 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.95,
-        (0, 255, 255),
-        3,
-        cv2.LINE_AA
-    )
-
-    print("=" * 50)
-    print("PALLET FRAME ONLY DETECTION - BORDER COLOR ONLY")
-    print(f"RAW    : {len(raw_candidates)}")
-    print(f"TOTAL  : {total}")
-    print(f"GREEN  : {counts['green']}")
-    print(f"CREAM  : {counts['cream']}")
-    print(f"BLUE   : {counts['blue']}")
-    print(f"WOOD   : {counts['wood']}")
-    print(f"CODE   : {result_code}")
-    print("=" * 50)
-
-    # =========================
-    # DEBUG SAVE
-    # =========================
-    if debug:
-        save_dbg("debug_original.jpg", roi)
-        save_dbg("debug_normalized.jpg", norm)
-        save_dbg("debug_green_mask.jpg", green_mask)
-        save_dbg("debug_blue_mask.jpg", blue_mask)
-        save_dbg("debug_cream_mask.jpg", cream_mask)
-        save_dbg("debug_wood_mask.jpg", wood_mask)
-        save_dbg("debug_edges.jpg", edge_base)
-        save_dbg("debug_line_mask.jpg", line_mask)
-        save_dbg("debug_frame_color.jpg", color_frame_mask)
-        save_dbg("debug_frame_mask.jpg", frame_mask)
-        save_dbg("debug_cargo.jpg", object_seed)
-        save_dbg("debug_object_seed_clean.jpg", object_seed)
-        save_dbg("debug_reject.jpg", debug_reject)
-        save_dbg("debug_pallet_box.jpg", debug_box)
-
-    return result_code
-
-# =========================
-# APPSHEET
-# =========================
-def update_appsheet(row_id, text):
-    if not APP_ID or not ACCESS_KEY:
-        return
+def update_appsheet(row_id, volume_text):
 
     url = f"https://api.appsheet.com/api/v2/apps/{APP_ID}/tables/{TABLE_NAME}/Action"
 
@@ -1449,83 +713,197 @@ def update_appsheet(row_id, text):
     }
 
     payload = {
-        "Action":"Edit",
-        "Rows":[
-            {"ID":row_id,"TFR AI":text,"status":"Done"}
+        "Action": "Edit",
+        "Rows": [
+            {
+                "id": row_id,
+                "TFR AI": volume_text,
+                "status": "Done"
+            }
         ]
     }
 
     try:
-        requests.post(url,json=payload,headers=headers,timeout=10)
-    except:
-        pass
+        r = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=20
+        )
+
+        print("APPSHEET STATUS:", r.status_code)
+        print("APPSHEET RESPONSE:", r.text[:300])
+
+    except Exception as e:
+        print("APPSHEET ERROR:", e)
 
 
 # =========================
-# DEBUG SERVER
+# HEALTH CHECK
 # =========================
-@app.route("/debug/<path:filename>")
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "service": "container-volume-ai"
+    })
+
+
+# =========================
+# DEBUG VIEW
+# =========================
+@app.route("/debug/<filename>", methods=["GET"])
 def debug_file(filename):
+
+    allowed = {
+        "debug_original.jpg",
+        "debug_normalized.jpg",
+        "debug_container.jpg",
+        "debug_cargo.jpg",
+        "debug_empty.jpg",
+        "debug_overlay.jpg",
+        "debug_overlay_light.jpg",
+        "debug_overlay_contour.jpg",
+        "debug_green.jpg",
+        "debug_brown.jpg",
+        "debug_blue.jpg",
+        "debug_dark.jpg",
+        "debug_texture.jpg"
+    }
+
+    if filename not in allowed:
+        return jsonify({"error": "file not allowed"}), 403
+
     path = os.path.join(DEBUG_DIR, filename)
+
     if not os.path.exists(path):
-        return "Not found",404
-    return send_file(path)
+        return jsonify({"error": "debug file not found"}), 404
+
+    return send_file(path, mimetype="image/jpeg")
 
 
-@app.route("/debug-list")
+@app.route("/debug-list", methods=["GET"])
 def debug_list():
-    return jsonify(os.listdir(DEBUG_DIR))
+
+    files = [
+        "debug_original.jpg",
+        "debug_normalized.jpg",
+        "debug_container.jpg",
+        "debug_cargo.jpg",
+        "debug_empty.jpg",
+        "debug_overlay.jpg",
+        "debug_overlay_light.jpg",
+        "debug_overlay_contour.jpg",
+        "debug_green.jpg",
+        "debug_brown.jpg",
+        "debug_blue.jpg",
+        "debug_dark.jpg",
+        "debug_texture.jpg"
+    ]
+
+    base_url = request.host_url.rstrip("/")
+
+    return jsonify({
+        "status": "ok",
+        "files": [
+            {
+                "file": f,
+                "url": f"{base_url}/debug/{f}",
+                "exists": os.path.exists(os.path.join(DEBUG_DIR, f))
+            }
+            for f in files
+        ]
+    })
 
 
 # =========================
-# API
+# API ENDPOINT
 # =========================
 @app.route("/predict", methods=["POST"])
 def predict():
 
-    data = request.get_json()
+    try:
+        data = request.get_json(silent=True)
 
-    print("="*40)
-    print("REQUEST:", data)
-    print("="*40)
+        if not data:
+            return jsonify({"error": "no json"}), 400
 
-    image_url = data.get("link")
-    row_id = data.get("id")
+        image_url = data.get("link")
+        row_id = data.get("id")
 
-    project = str(data.get("project","")).strip().lower()
+        # optional
+        debug = bool(data.get("debug", True))
+        return_empty = bool(data.get("return_empty", False))
 
-    if project not in ["inbound", "outbound"]:
-        print("⚠️ INVALID PROJECT → FORCE INBOUND")
-        project = "inbound"
+        if not image_url or not row_id:
+            return jsonify({"error": "missing data"}), 400
 
-    print("PROJECT =", project)
+        # =========================
+        # DUPLICATE LOCK
+        # =========================
+        with lock:
+            if row_id in processed_ids:
+                return jsonify({"status": "skipped"}), 200
 
-    if not image_url or not row_id:
-        return {"error":"missing"},400
+            processed_ids.add(row_id)
 
-    img = download_image(image_url)
-    if img is None:
-        return {"error":"image fail"},400
+        # =========================
+        # IMAGE LOAD
+        # =========================
+        img = download_image(image_url)
 
-    if project == "inbound":
-        print("RUN PALLET MODEL")
-        result = str(gen_pallet(img))
+        if img is None:
+            return jsonify({"error": "image fail"}), 400
 
-    else:
-        print("RUN VOLUME MODEL")
-        result = f"{gen_volume(img)}%"
+        # =========================
+        # AI PROCESS
+        # =========================
+        volume = gen_volume(
+            img,
+            debug=debug,
+            return_empty=return_empty
+        )
 
-    update_appsheet(row_id, result)
+        volume_text = f"{volume}%"
 
-    return {
-        "status":"success",
-        "project": project,
-        "result": result
-    }
+        print("VOLUME:", volume_text)
+
+        # =========================
+        # UPDATE SHEET
+        # =========================
+        update_appsheet(row_id, volume_text)
+
+        base_url = request.host_url.rstrip("/")
+
+        return jsonify({
+            "status": "success",
+            "id": row_id,
+            "volume": volume_text,
+            "mode": "empty" if return_empty else "filled",
+            "debug": debug,
+            "debug_urls": {
+                "overlay": f"{base_url}/debug/debug_overlay.jpg",
+                "overlay_light": f"{base_url}/debug/debug_overlay_light.jpg",
+                "overlay_contour": f"{base_url}/debug/debug_overlay_contour.jpg",
+                "cargo": f"{base_url}/debug/debug_cargo.jpg",
+                "empty": f"{base_url}/debug/debug_empty.jpg",
+                "container": f"{base_url}/debug/debug_container.jpg",
+                "blue": f"{base_url}/debug/debug_blue.jpg",
+                "list": f"{base_url}/debug-list"
+            }
+        })
+
+    except Exception:
+        print(traceback.format_exc())
+        return jsonify({"error": "server error"}), 500
 
 
 # =========================
-# RUN
+# RUN SERVER
 # =========================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(
+        host="0.0.0.0",
+        port=10000,
+        threaded=True
+    )
