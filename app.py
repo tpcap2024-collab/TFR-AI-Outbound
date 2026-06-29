@@ -206,7 +206,7 @@ def gen_pallet(img, debug=True):
         if t == "green":
             return (0, 255, 0)
         if t == "blue":
-            return (255, 120, 0)
+            return (255, 130, 0)
         if t == "cream":
             return (0, 255, 255)
         if t == "wood":
@@ -238,7 +238,7 @@ def gen_pallet(img, debug=True):
 
         return inter / float(union)
 
-    def nms_iou(boxes, types, iou_th=0.20):
+    def nms_iou(boxes, types, iou_th=0.18):
         if not boxes:
             return boxes, types
 
@@ -246,7 +246,8 @@ def gen_pallet(img, debug=True):
 
         for i, b in enumerate(boxes):
             x, y, w, h = b
-            items.append((b, types[i], w * h))
+            area = w * h
+            items.append((b, types[i], area))
 
         items = sorted(items, key=lambda v: v[2], reverse=True)
 
@@ -295,11 +296,11 @@ def gen_pallet(img, debug=True):
 
     rh, rw = roi.shape[:2]
 
-    top_cut = int(rh * 0.16)
+    top_cut = int(rh * 0.17)
     bottom_cut = int(rh * 0.84)
 
     # =========================
-    # NORMALIZE LIGHT
+    # LIGHT NORMALIZE
     # =========================
     lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
@@ -399,30 +400,17 @@ def gen_pallet(img, debug=True):
 
     line_mask = cv2.bitwise_or(vertical_lines, horizontal_lines)
 
-    # ให้เส้นที่อยู่ใกล้วัสดุเท่านั้น
+    # สำคัญ: ใช้เฉพาะเส้นที่อยู่ใกล้วัสดุเท่านั้น
+    # ตัดเส้นผนัง / ขอบตู้ที่ไม่มี material ออก
     material_dilate = cv2.dilate(
         material_mask,
         cv2.getStructuringElement(cv2.MORPH_RECT, (35, 25)),
         iterations=1
     )
 
-    line_near_material = cv2.bitwise_and(
+    frame_mask = cv2.bitwise_and(
         line_mask,
         material_dilate
-    )
-
-    # อนุญาตเส้นในโซนล่างของสินค้า เพราะบางกรงสีไม่ติด
-    lower_zone = np.zeros_like(line_mask)
-    lower_zone[int(rh * 0.28):bottom_cut, :] = 255
-
-    line_lower = cv2.bitwise_and(
-        line_mask,
-        lower_zone
-    )
-
-    frame_mask = cv2.bitwise_or(
-        line_near_material,
-        line_lower
     )
 
     frame_mask = cv2.morphologyEx(
@@ -434,14 +422,13 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # OBJECT SEED
-    # ไม่ตีตาราง ใช้ component จริง
+    # ห้ามตีตาราง ใช้ component จริงเท่านั้น
     # =========================
     object_seed = cv2.bitwise_or(
         material_mask,
         frame_mask
     )
 
-    # close เบา ๆ เท่านั้น
     object_seed = cv2.morphologyEx(
         object_seed,
         cv2.MORPH_CLOSE,
@@ -477,7 +464,7 @@ def gen_pallet(img, debug=True):
         border_mask[:, :border] = 255
         border_mask[:, w - border:] = 255
 
-        area = float(max(1, cv2.countNonZero(border_mask)))
+        border_area = float(max(1, cv2.countNonZero(border_mask)))
 
         g_crop = green_mask[y1:y2, x1:x2]
         b_crop = blue_mask[y1:y2, x1:x2]
@@ -485,11 +472,11 @@ def gen_pallet(img, debug=True):
         w_crop = wood_mask[y1:y2, x1:x2]
         f_crop = frame_mask[y1:y2, x1:x2]
 
-        g = cv2.countNonZero(cv2.bitwise_and(g_crop, border_mask)) / area
-        b = cv2.countNonZero(cv2.bitwise_and(b_crop, border_mask)) / area
-        c = cv2.countNonZero(cv2.bitwise_and(c_crop, border_mask)) / area
-        wd = cv2.countNonZero(cv2.bitwise_and(w_crop, border_mask)) / area
-        fr = cv2.countNonZero(cv2.bitwise_and(f_crop, border_mask)) / area
+        g = cv2.countNonZero(cv2.bitwise_and(g_crop, border_mask)) / border_area
+        b = cv2.countNonZero(cv2.bitwise_and(b_crop, border_mask)) / border_area
+        c = cv2.countNonZero(cv2.bitwise_and(c_crop, border_mask)) / border_area
+        wd = cv2.countNonZero(cv2.bitwise_and(w_crop, border_mask)) / border_area
+        fr = cv2.countNonZero(cv2.bitwise_and(f_crop, border_mask)) / border_area
 
         # ครึ่งล่างต้องมีหลักฐานจริง
         lower_y1 = y + int(h * 0.45)
