@@ -243,7 +243,7 @@ def gen_pallet(img, debug=True):
         keep_boxes = []
         keep_types = []
 
-        for b, t, area in items:
+        for b, t, _ in items:
             duplicate = False
 
             for old in keep_boxes:
@@ -346,6 +346,7 @@ def gen_pallet(img, debug=True):
     wood_mask = clean(wood_mask, 5, 1, 1)
 
     # material_mask ใช้ validate / classify เท่านั้น
+    # ห้ามเอาไปเป็น object_seed
     material_mask = cv2.bitwise_or(green_mask, blue_mask)
     material_mask = cv2.bitwise_or(material_mask, cream_mask)
     material_mask = cv2.bitwise_or(material_mask, wood_mask)
@@ -395,13 +396,15 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # FRAME SEED ONLY
-    # ห้ามใช้ material_mask ทั้งก้อนเป็น object_seed
     # =========================
+
+    # green/blue เป็น frame ได้โดยตรง
     color_frame_mask = cv2.bitwise_or(
         green_mask,
         blue_mask
     )
 
+    # cream ใช้เฉพาะส่วนที่ซ้อนกับ line เท่านั้น
     cream_edge = cv2.bitwise_and(
         cream_mask,
         line_mask
@@ -465,8 +468,67 @@ def gen_pallet(img, debug=True):
         iterations=1
     )
 
-    # ใช้เฉพาะ frame เป็น seed
+    # =========================
+    # OBJECT SEED - FRAME ONLY
+    # =========================
     object_seed = frame_mask.copy()
+
+    # =========================
+    # CLEAN OBJECT SEED
+    # เพิ่มล่าสุด: ตัดหลังคา / คานยาว / พื้นรถ / ก้อนใหญ่ผิดรูป
+    # =========================
+    def clean_object_seed(seed):
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            seed,
+            connectivity=8
+        )
+
+        result = np.zeros_like(seed)
+
+        for i in range(1, num_labels):
+            x = stats[i, cv2.CC_STAT_LEFT]
+            y = stats[i, cv2.CC_STAT_TOP]
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            area = stats[i, cv2.CC_STAT_AREA]
+
+            if area < rw * rh * 0.0004:
+                continue
+
+            if w < rw * 0.025:
+                continue
+
+            if h < rh * 0.030:
+                continue
+
+            # ตัดหลังคา / เงาด้านบน
+            if y < rh * 0.18 and h < rh * 0.16:
+                continue
+
+            # ตัดคานยาวแนวนอน
+            if w > rw * 0.55 and h < rh * 0.12:
+                continue
+
+            # ตัดพื้นรถ / กันชน / ราวล่าง
+            if y > rh * 0.62 and h < rh * 0.12:
+                continue
+
+            # ตัดก้อนใหญ่เกินที่น่าจะเป็นผนัง/หลังคา
+            if w > rw * 0.65 and h > rh * 0.35:
+                continue
+
+            result[labels == i] = 255
+
+        result = cv2.morphologyEx(
+            result,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3)),
+            iterations=1
+        )
+
+        return result
+
+    object_seed = clean_object_seed(object_seed)
 
     # =========================
     # CLASSIFY BY BORDER
@@ -536,6 +598,7 @@ def gen_pallet(img, debug=True):
 
     # =========================
     # VALID PALLET BOX
+    # ผ่อน threshold ล่าสุด ไม่ให้ตัดหมด
     # =========================
     def valid_pallet_box(x, y, w, h):
 
@@ -545,12 +608,14 @@ def gen_pallet(img, debug=True):
         if y + h > bottom_cut:
             return False
 
-        if w < rw * 0.055:
+        # ไม่เล็กเกิน
+        if w < rw * 0.045:
             return False
 
-        if h < rh * 0.080:
+        if h < rh * 0.065:
             return False
 
+        # ไม่ใหญ่เกิน
         if w > rw * 0.48:
             return False
 
@@ -559,6 +624,7 @@ def gen_pallet(img, debug=True):
 
         aspect = w / float(max(1, h))
 
+        # ไม่เป็นเสา ไม่เป็นคานแบน
         if aspect < 0.32:
             return False
 
@@ -575,7 +641,8 @@ def gen_pallet(img, debug=True):
             material_mask[y:y + h, x:x + w]
         ) / area
 
-        if frame_den < 0.004 and material_den < 0.004:
+        # ผ่อนล่าสุด
+        if frame_den < 0.0025 and material_den < 0.0025:
             return False
 
         lower_y1 = y + int(h * 0.45)
@@ -589,13 +656,14 @@ def gen_pallet(img, debug=True):
             material_mask[lower_y1:y + h, x:x + w]
         ) / lower_area
 
-        if max(lower_frame, lower_material) < 0.003:
+        # ผ่อนล่าสุด
+        if max(lower_frame, lower_material) < 0.002:
             return False
 
         return True
 
     # =========================
-    # FIND COMPONENTS FROM FRAME ONLY
+    # FIND COMPONENTS FROM CLEAN OBJECT SEED
     # =========================
     contours, _ = cv2.findContours(
         object_seed,
@@ -750,6 +818,7 @@ def gen_pallet(img, debug=True):
         save_dbg("debug_frame_color.jpg", color_frame_mask)
         save_dbg("debug_frame_mask.jpg", frame_mask)
         save_dbg("debug_cargo.jpg", object_seed)
+        save_dbg("debug_object_seed_clean.jpg", object_seed)
         save_dbg("debug_reject.jpg", debug_reject)
         save_dbg("debug_pallet_box.jpg", debug_box)
 
