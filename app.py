@@ -28,8 +28,39 @@ os.makedirs(DEBUG_DIR, exist_ok=True)
 # =========================
 # LOCK
 # =========================
-processed_ids = set()
+processed_ids = {}
 lock = threading.Lock()
+
+# เก็บ row_id ไว้กันยิงซ้ำชั่วคราวเท่านั้น
+# ครบเวลาแล้วจะถูกลบออก เพื่อไม่ให้ memory โตไม่จำกัด
+PROCESSED_ID_TTL_SECONDS = 10 * 60   # 10 นาที
+MAX_PROCESSED_IDS = 1000             # กัน memory โตผิดปกติ
+
+
+def cleanup_processed_ids():
+    now = time.time()
+
+    # ลบ id ที่หมดอายุ
+    expired_ids = [
+        row_id
+        for row_id, ts in processed_ids.items()
+        if now - ts > PROCESSED_ID_TTL_SECONDS
+    ]
+
+    for row_id in expired_ids:
+        processed_ids.pop(row_id, None)
+
+    # ถ้ายังเกินจำนวนสูงสุด ให้ลบตัวเก่าสุดออก
+    if len(processed_ids) > MAX_PROCESSED_IDS:
+        sorted_items = sorted(
+            processed_ids.items(),
+            key=lambda x: x[1]
+        )
+
+        overflow = len(processed_ids) - MAX_PROCESSED_IDS
+
+        for row_id, _ in sorted_items[:overflow]:
+            processed_ids.pop(row_id, None)
 
 
 # =========================
@@ -102,9 +133,6 @@ def clean_mask(mask, min_area_ratio=0.002):
     return result
 
 
-# =========================
-# BALANCED VOLUME MODEL
-# =========================
 # =========================
 # BALANCED VOLUME MODEL
 # =========================
@@ -842,10 +870,12 @@ def predict():
         # DUPLICATE LOCK
         # =========================
         with lock:
+            cleanup_processed_ids()
+
             if row_id in processed_ids:
                 return jsonify({"status": "skipped"}), 200
 
-            processed_ids.add(row_id)
+            processed_ids[row_id] = time.time()
 
         # =========================
         # IMAGE LOAD
