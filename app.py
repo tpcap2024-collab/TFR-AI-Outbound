@@ -40,7 +40,6 @@ MAX_PROCESSED_IDS = 1000             # กัน memory โตผิดปกต
 def cleanup_processed_ids():
     now = time.time()
 
-    # ลบ id ที่หมดอายุ
     expired_ids = [
         row_id
         for row_id, ts in processed_ids.items()
@@ -50,7 +49,6 @@ def cleanup_processed_ids():
     for row_id in expired_ids:
         processed_ids.pop(row_id, None)
 
-    # ถ้ายังเกินจำนวนสูงสุด ให้ลบตัวเก่าสุดออก
     if len(processed_ids) > MAX_PROCESSED_IDS:
         sorted_items = sorted(
             processed_ids.items(),
@@ -134,9 +132,10 @@ def clean_mask(mask, min_area_ratio=0.002):
 
 
 # =========================
-# BALANCED VOLUME MODEL
+# OUTBOUND FILLRATE MODEL
+# เดิมคือ gen_volume()
 # =========================
-def gen_volume(img, debug=True, return_empty=False):
+def gen_fillrate_outbound(img, debug=True, return_empty=False):
 
     if img is None or img.size == 0:
         return 0
@@ -270,7 +269,6 @@ def gen_volume(img, debug=True, return_empty=False):
     )
 
     # RED CRATE / RED CARGO
-    # สีแดงใน HSV ต้องแยก 2 ช่วง เพราะ Hue อยู่ทั้งต้นและท้ายวงสี
     red_mask_1 = cv2.inRange(
         hsv,
         (0, 60, 50),
@@ -289,7 +287,6 @@ def gen_volume(img, debug=True, return_empty=False):
     )
 
     # DARK CARGO
-    # ปรับเข้มขึ้นเพื่อลดการจับเงา / ผ้า / พื้นมืด
     dark_mask = cv2.inRange(
         hsv,
         (0, 55, 0),
@@ -308,7 +305,6 @@ def gen_volume(img, debug=True, return_empty=False):
         7
     )
 
-    # ใช้ AND แทน OR เพื่อลดการจับผนัง / ผ้า / เพดาน
     strong_saturation_mask = cv2.inRange(
         s_channel,
         70,
@@ -333,7 +329,6 @@ def gen_volume(img, debug=True, return_empty=False):
 
     # =========================
     # EDGE DENSITY FILTER
-    # ลด false positive จากผ้า / ผิวเรียบ / เพดาน
     # =========================
     edges = cv2.Canny(
         gray_blur,
@@ -359,8 +354,6 @@ def gen_volume(img, debug=True, return_empty=False):
 
     # =========================
     # TOP FALSE POSITIVE SUPPRESSION
-    # ไม่ตัด color cargo ด้านบนทั้งหมด เพราะบางภาพมีกล่องจริงอยู่ด้านบน
-    # ตัดเฉพาะ texture/dark ที่มักติดเพดานหรือผ้า
     # =========================
     top_suppress_mask = np.full(
         (rh, rw),
@@ -446,7 +439,6 @@ def gen_volume(img, debug=True, return_empty=False):
         iterations=1
     )
 
-    # ลด noise จุดเล็ก
     cargo_mask = clean_mask(
         cargo_mask,
         min_area_ratio=0.005
@@ -454,7 +446,6 @@ def gen_volume(img, debug=True, return_empty=False):
 
     # =========================
     # CONTOUR FILTER
-    # กรอง noise เล็ก ๆ และ shape ที่ไม่น่าเป็น cargo
     # =========================
     contours, _ = cv2.findContours(
         cargo_mask,
@@ -479,7 +470,6 @@ def gen_volume(img, debug=True, return_empty=False):
 
         aspect_ratio = w_box / float(h_box)
 
-        # ช่วงกว้างขึ้นเพื่อไม่ตัดกล่องที่เรียงยาวหลายใบ
         if 0.20 <= aspect_ratio <= 6.50:
             cv2.drawContours(
                 filtered_mask,
@@ -639,7 +629,6 @@ def gen_volume(img, debug=True, return_empty=False):
         )
 
         # BLUE = empty
-        # เปลี่ยนจากสีแดงเป็นสีน้ำเงิน เพื่อไม่ให้กลืนกับลังแดงจริง
         color_layer[empty_mask > 0] = (
             255,
             0,
@@ -660,7 +649,6 @@ def gen_volume(img, debug=True, return_empty=False):
             cv2.CHAIN_APPROX_SIMPLE
         )
 
-        # YELLOW contour = cargo
         cv2.drawContours(
             overlay,
             cargo_contours,
@@ -675,7 +663,6 @@ def gen_volume(img, debug=True, return_empty=False):
             cv2.CHAIN_APPROX_SIMPLE
         )
 
-        # BLUE contour = empty
         cv2.drawContours(
             overlay,
             empty_contours,
@@ -729,6 +716,19 @@ def gen_volume(img, debug=True, return_empty=False):
 
 
 # =========================
+# INBOUND FILLRATE MODEL
+# เดิมคือ gen_pallet()
+# =========================
+def gen_fillrate_inbound(img, debug=True, return_empty=False):
+
+    return gen_fillrate_outbound(
+        img,
+        debug=debug,
+        return_empty=return_empty
+    )
+
+
+# =========================
 # UPDATE APPSHEET
 # =========================
 def update_appsheet(row_id, volume_text):
@@ -773,7 +773,7 @@ def update_appsheet(row_id, volume_text):
 def health():
     return jsonify({
         "status": "ok",
-        "service": "container-volume-ai"
+        "service": "container-fillrate-ai"
     })
 
 
@@ -856,15 +856,25 @@ def predict():
         if not data:
             return jsonify({"error": "no json"}), 400
 
-        image_url = data.get("link")
         row_id = data.get("id")
+        project = data.get("project", "")
+
+        # Outbound image
+        image_url = data.get("link")
+
+        # Inbound images
+        left_url = data.get("link Left")
+        right_url = data.get("link Right")
 
         # optional
         debug = bool(data.get("debug", True))
         return_empty = bool(data.get("return_empty", False))
 
-        if not image_url or not row_id:
-            return jsonify({"error": "missing data"}), 400
+        if not row_id:
+            return jsonify({"error": "missing id"}), 400
+
+        if not project:
+            return jsonify({"error": "missing project"}), 400
 
         # =========================
         # DUPLICATE LOCK
@@ -878,25 +888,93 @@ def predict():
             processed_ids[row_id] = time.time()
 
         # =========================
-        # IMAGE LOAD
+        # PROJECT = INBOUND
         # =========================
-        img = download_image(image_url)
+        if project == "Inbound":
 
-        if img is None:
-            return jsonify({"error": "image fail"}), 400
+            if not left_url or not right_url:
+                return jsonify({
+                    "error": "missing inbound images",
+                    "required": ["link Left", "link Right"]
+                }), 400
+
+            img_left = download_image(left_url)
+
+            if img_left is None:
+                return jsonify({"error": "left image fail"}), 400
+
+            img_right = download_image(right_url)
+
+            if img_right is None:
+                return jsonify({"error": "right image fail"}), 400
+
+            left_volume = gen_fillrate_inbound(
+                img_left,
+                debug=debug,
+                return_empty=return_empty
+            )
+
+            right_volume = gen_fillrate_inbound(
+                img_right,
+                debug=debug,
+                return_empty=return_empty
+            )
+
+            volume = int(round(((left_volume + right_volume) / 2) / 5) * 5)
+            volume = max(0, min(100, volume))
+
+            mode = "inbound_fillrate"
+
+            print(
+                f"PROJECT=Inbound "
+                f"LEFT={left_volume}% "
+                f"RIGHT={right_volume}% "
+                f"AVG={volume}%"
+            )
 
         # =========================
-        # AI PROCESS
+        # PROJECT = OUTBOUND
         # =========================
-        volume = gen_volume(
-            img,
-            debug=debug,
-            return_empty=return_empty
-        )
+        elif project == "Outbound":
+
+            if not image_url:
+                return jsonify({
+                    "error": "missing outbound image",
+                    "required": ["link"]
+                }), 400
+
+            img = download_image(image_url)
+
+            if img is None:
+                return jsonify({"error": "image fail"}), 400
+
+            volume = gen_fillrate_outbound(
+                img,
+                debug=debug,
+                return_empty=return_empty
+            )
+
+            mode = "outbound_fillrate"
+
+            print(
+                f"PROJECT=Outbound "
+                f"VOLUME={volume}% "
+                f"MODE={mode}"
+            )
+
+        # =========================
+        # INVALID PROJECT
+        # =========================
+        else:
+            return jsonify({
+                "error": "invalid project",
+                "project": project,
+                "allowed": ["Inbound", "Outbound"]
+            }), 400
 
         volume_text = f"{volume}%"
 
-        print("VOLUME:", volume_text)
+        print("FINAL VOLUME:", volume_text)
 
         # =========================
         # UPDATE SHEET
@@ -908,8 +986,9 @@ def predict():
         return jsonify({
             "status": "success",
             "id": row_id,
+            "project": project,
             "volume": volume_text,
-            "mode": "empty" if return_empty else "filled",
+            "mode": mode,
             "debug": debug,
             "debug_urls": {
                 "overlay": f"{base_url}/debug/debug_overlay.jpg",
